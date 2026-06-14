@@ -5,9 +5,19 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.Date;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.sql.Types;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -88,6 +98,25 @@ final class DbxJdbcPluginTest {
 
         assertFalse(response.has("error"), response.toString());
         assertEquals("中文测试", response.path("result").path("rows").path(0).path(0).asText());
+    }
+
+    @Test
+    void readValueFormatsDateColumnsWithoutMidnightTime() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("readValue", ResultSet.class, ResultSetMetaData.class, int.class);
+        method.setAccessible(true);
+        ResultSet rs = temporalResultSet(Timestamp.valueOf("2026-06-10 00:00:00"), Date.valueOf("2026-06-10"));
+
+        assertEquals("2026-06-10", method.invoke(null, rs, columnMeta(Types.DATE), 1));
+    }
+
+    @Test
+    void readValueKeepsTimestampTimeComponent() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("readValue", ResultSet.class, ResultSetMetaData.class, int.class);
+        method.setAccessible(true);
+        Timestamp timestamp = Timestamp.valueOf("2026-06-10 12:34:56");
+        ResultSet rs = temporalResultSet(timestamp, Date.valueOf("2026-06-10"));
+
+        assertEquals("2026-06-10 12:34:56.0", method.invoke(null, rs, columnMeta(Types.TIMESTAMP), 1));
     }
 
     @Test
@@ -246,19 +275,92 @@ final class DbxJdbcPluginTest {
         assertEquals(true, DbxJdbcPlugin.driverQuirks(iris).skipExecutionContext());
         assertEquals(false, DbxJdbcPlugin.driverQuirks(iris).useOracleMetadata());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(iris).caseInsensitiveSchemaMetadata());
+        assertEquals(
+            DbxJdbcPlugin.StatementMaxRowsMode.READ_LOOP_ONLY,
+            DbxJdbcPlugin.driverQuirks(iris).statementMaxRowsMode()
+        );
         assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).skipExecutionContext());
         assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).useOracleMetadata());
         assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).caseInsensitiveSchemaMetadata());
         assertEquals(false, DbxJdbcPlugin.driverQuirks(h2).useCatalogFallbackSql());
+        assertEquals(
+            DbxJdbcPlugin.StatementMaxRowsMode.APPLY_STATEMENT_MAX_ROWS,
+            DbxJdbcPlugin.driverQuirks(h2).statementMaxRowsMode()
+        );
         assertEquals(true, DbxJdbcPlugin.driverQuirks(mysql).useCatalogFallbackSql());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kingbase).ignoreCatalogForSchemaMetadata());
         assertEquals(true, DbxJdbcPlugin.driverQuirks(kyuubi).useCatalogFallbackSql());
     }
 
     @Test
+    void irisStatementOptionsSkipDriverMaxRowsRewrite() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyStatementOptions",
+            Statement.class,
+            int.class,
+            int.class,
+            int.class,
+            DbxJdbcPlugin.JdbcDriverQuirks.class
+        );
+        method.setAccessible(true);
+        JsonNode iris = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:IRIS://127.0.0.1:1972/USER"
+            }
+            """);
+        List<String> calls = new ArrayList<>();
+
+        method.invoke(null, recordingStatement(calls), 100, 50, 30, DbxJdbcPlugin.driverQuirks(iris));
+
+        assertFalse(calls.contains("setMaxRows"), calls.toString());
+        assertEquals(true, calls.contains("setFetchSize"));
+        assertEquals(true, calls.contains("setQueryTimeout"));
+    }
+
+    @Test
+    void defaultStatementOptionsApplyDriverMaxRowsProtection() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyStatementOptions",
+            Statement.class,
+            int.class,
+            int.class,
+            int.class,
+            DbxJdbcPlugin.JdbcDriverQuirks.class
+        );
+        method.setAccessible(true);
+        JsonNode h2 = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:h2:mem:dbx_quirks"
+            }
+            """);
+        List<String> calls = new ArrayList<>();
+
+        method.invoke(null, recordingStatement(calls), 100, 50, 30, DbxJdbcPlugin.driverQuirks(h2));
+
+        assertEquals(true, calls.contains("setMaxRows"));
+        assertEquals(true, calls.contains("setFetchSize"));
+        assertEquals(true, calls.contains("setQueryTimeout"));
+    }
+
+    @Test
     void schemaDisplayNamePrefersMixedCaseOverAllUppercaseDuplicate() {
         assertEquals(true, DbxJdbcPlugin.preferSchemaDisplayName("SQLUSER", "SQLUser"));
         assertEquals(false, DbxJdbcPlugin.preferSchemaDisplayName("SQLUser", "SQLUSER"));
+    }
+
+    @Test
+    void jdbcTableTypesUsesDriverTypesWithinDefaultAllowList() throws Exception {
+        String[] types = DbxJdbcPlugin.jdbcTableTypes(tableTypesMeta("TABLE", "LOCAL TEMPORARY", "BASE TABLE"));
+
+        assertEquals(List.of("TABLE", "BASE TABLE"), List.of(types));
+    }
+
+    @Test
+    void jdbcTableTypesFallsBackWhenDriverReturnsNoAllowedTypes() throws Exception {
+        String[] types = DbxJdbcPlugin.jdbcTableTypes(tableTypesMeta("LOCAL TEMPORARY"));
+
+        assertEquals(true, List.of(types).contains("BASE TABLE"));
+        assertEquals(true, List.of(types).contains("TABLE"));
     }
 
     @Test
@@ -486,6 +588,82 @@ final class DbxJdbcPluginTest {
               "sql": "CREATE TABLE IF NOT EXISTS app.people (id INT PRIMARY KEY, name VARCHAR(30))"
             }
             """.formatted(CONNECTION));
+    }
+
+    private static Statement recordingStatement(List<String> calls) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> {
+                calls.add(method.getName());
+                Class<?> returnType = method.getReturnType();
+                if (returnType == boolean.class) return false;
+                if (returnType == int.class) return 0;
+                if (returnType == long.class) return 0L;
+                if (returnType == float.class) return 0f;
+                if (returnType == double.class) return 0d;
+                return null;
+            }
+        );
+    }
+
+    private static ResultSet temporalResultSet(Object objectValue, Date dateValue) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getObject", "getTimestamp" -> objectValue;
+                case "getDate" -> dateValue;
+                case "getBytes" -> null;
+                default -> null;
+            }
+        );
+    }
+
+    private static ResultSetMetaData columnMeta(int columnType) {
+        return (ResultSetMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSetMetaData.class },
+            (proxy, method, args) -> {
+                if ("getColumnType".equals(method.getName())) {
+                    return columnType;
+                }
+                return null;
+            }
+        );
+    }
+
+    private static DatabaseMetaData tableTypesMeta(String... types) {
+        return (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getTableTypes".equals(method.getName())) {
+                    return tableTypesResultSet(types);
+                }
+                return null;
+            }
+        );
+    }
+
+    private static ResultSet tableTypesResultSet(String[] types) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            new java.lang.reflect.InvocationHandler() {
+                private int index = -1;
+
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) {
+                    return switch (method.getName()) {
+                        case "next" -> ++index < types.length;
+                        case "getString" -> types[index];
+                        case "close" -> null;
+                        default -> null;
+                    };
+                }
+            }
+        );
     }
 
     private static JsonNode request(String method, String params) throws Exception {

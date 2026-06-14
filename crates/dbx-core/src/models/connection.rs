@@ -30,10 +30,16 @@ pub struct ConnectionConfig {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_query_timeout_secs")]
     pub query_timeout_secs: u64,
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
     #[serde(default)]
     pub ssl: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ca_cert_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_cert_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_key_path: String,
     #[serde(default)]
     pub sysdba: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,6 +60,12 @@ pub struct ConnectionConfig {
     pub redis_sentinel_tls: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub redis_cluster_nodes: String,
+    #[serde(default = "default_redis_key_separator", skip_serializing_if = "is_default_redis_separator")]
+    pub redis_key_separator: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub etcd_endpoints: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gbase_server: String,
     /// Typed configuration for external tabular sources.
     #[serde(default)]
     pub external_config: Option<serde_json::Value>,
@@ -63,6 +75,8 @@ pub struct ConnectionConfig {
     pub jdbc_driver_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub one_time: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +140,8 @@ pub struct SshTunnelConfig {
     pub connect_timeout_secs: u64,
     #[serde(default)]
     pub expose_lan: bool,
+    #[serde(default)]
+    pub use_ssh_agent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,12 +190,24 @@ pub fn default_query_timeout_secs() -> u64 {
     30
 }
 
+pub fn default_idle_timeout_secs() -> u64 {
+    60
+}
+
 fn default_proxy_port() -> u16 {
     1080
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+pub fn default_redis_key_separator() -> String {
+    ":".to_string()
+}
+
+fn is_default_redis_separator(value: &str) -> bool {
+    value == ":"
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,6 +242,8 @@ pub enum DatabaseType {
     Doris,
     #[serde(rename = "starrocks")]
     StarRocks,
+    #[serde(rename = "manticoresearch")]
+    ManticoreSearch,
     Databend,
     Redshift,
     Dameng,
@@ -255,8 +285,15 @@ pub enum DatabaseType {
     Tdengine,
     Xugu,
     Iotdb,
+    Etcd,
     #[serde(rename = "iris")]
     Iris,
+    #[serde(rename = "turso")]
+    Turso,
+    #[serde(rename = "influxdb")]
+    InfluxDb,
+    #[serde(rename = "questdb")]
+    Questdb,
     Jdbc,
 }
 
@@ -288,10 +325,16 @@ struct ConnectionConfigData {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_query_timeout_secs")]
     pub query_timeout_secs: u64,
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
     #[serde(default)]
     pub ssl: bool,
     #[serde(default)]
     pub ca_cert_path: String,
+    #[serde(default)]
+    pub client_cert_path: String,
+    #[serde(default)]
+    pub client_key_path: String,
     #[serde(default)]
     pub sysdba: bool,
     #[serde(default)]
@@ -312,6 +355,12 @@ struct ConnectionConfigData {
     pub redis_sentinel_tls: bool,
     #[serde(default)]
     pub redis_cluster_nodes: String,
+    #[serde(default = "default_redis_key_separator")]
+    pub redis_key_separator: String,
+    #[serde(default)]
+    pub etcd_endpoints: String,
+    #[serde(default)]
+    pub gbase_server: String,
     #[serde(default)]
     pub external_config: Option<serde_json::Value>,
     #[serde(default)]
@@ -320,6 +369,8 @@ struct ConnectionConfigData {
     pub jdbc_driver_paths: Vec<String>,
     #[serde(default)]
     pub one_time: bool,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 impl From<ConnectionConfigData> for ConnectionConfig {
@@ -342,8 +393,11 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             transport_layers: data.transport_layers,
             connect_timeout_secs: data.connect_timeout_secs,
             query_timeout_secs: data.query_timeout_secs,
+            idle_timeout_secs: data.idle_timeout_secs,
             ssl: data.ssl,
             ca_cert_path: data.ca_cert_path,
+            client_cert_path: data.client_cert_path,
+            client_key_path: data.client_key_path,
             sysdba: data.sysdba,
             oracle_connection_type: data.oracle_connection_type,
             connection_string: data.connection_string,
@@ -354,10 +408,14 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_sentinel_password: data.redis_sentinel_password,
             redis_sentinel_tls: data.redis_sentinel_tls,
             redis_cluster_nodes: data.redis_cluster_nodes,
+            redis_key_separator: data.redis_key_separator,
+            etcd_endpoints: data.etcd_endpoints,
+            gbase_server: data.gbase_server,
             external_config: data.external_config,
             jdbc_driver_class: data.jdbc_driver_class,
             jdbc_driver_paths: data.jdbc_driver_paths,
             one_time: data.one_time,
+            read_only: data.read_only,
         }
     }
 }
@@ -529,7 +587,7 @@ impl ConnectionConfig {
             },
             DatabaseType::Redshift => Some("dev"),
             DatabaseType::ClickHouse => Some("default"),
-            DatabaseType::Rqlite => Some("main"),
+            DatabaseType::Rqlite | DatabaseType::Turso => Some("main"),
             DatabaseType::Gaussdb | DatabaseType::OpenGauss => Some("postgres"),
             DatabaseType::Kwdb => Some("defaultdb"),
             DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
@@ -544,12 +602,10 @@ impl ConnectionConfig {
     }
 
     pub fn needs_bare_mysql(&self) -> bool {
-        matches!(self.db_type, DatabaseType::Doris | DatabaseType::StarRocks)
-            || self
-                .driver_profile
-                .as_deref()
-                .map(|p| p.to_lowercase())
-                .is_some_and(|p| matches!(p.as_str(), "doris" | "starrocks" | "selectdb" | "oceanbase"))
+        matches!(self.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
+            || self.driver_profile.as_deref().map(|p| p.to_lowercase()).is_some_and(|p| {
+                matches!(p.as_str(), "doris" | "starrocks" | "manticoresearch" | "selectdb" | "oceanbase")
+            })
     }
 
     pub fn canonicalized(&self) -> Self {
@@ -607,7 +663,11 @@ impl ConnectionConfig {
                 let fragment = self.redis_tls_insecure_fragment();
                 format!("{scheme}://{host}:{port}/{fragment}")
             }
-            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Databend => {
+            DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
+            | DatabaseType::Databend => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
                 format!("mysql://{host}:{port}{db_part}{suffix}")
             }
@@ -617,6 +677,7 @@ impl ConnectionConfig {
             }
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
+            DatabaseType::Turso => turso_http_url(self, raw_host, port),
             DatabaseType::SqlServer => {
                 format!("server=tcp:{host},{port};database={}", self.database.as_deref().unwrap_or("master"))
             }
@@ -636,10 +697,7 @@ impl ConnectionConfig {
                         suffix.push_str("&directConnection=true");
                     }
                 }
-                let scheme = if self.ssl { "mongodb+srv" } else { "mongodb" };
-                // SRV URLs resolve the port via DNS SRV records, so we omit the explicit port.
-                let addr = if self.ssl { host.to_string() } else { format!("{host}:{port}") };
-                format!("{scheme}://{addr}{db_part}{suffix}")
+                format!("mongodb://{host}:{port}{db_part}{suffix}")
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch => {
@@ -669,6 +727,7 @@ impl ConnectionConfig {
                     format!("{base}?{params}")
                 }
             }
+            DatabaseType::Questdb => format!("questdb://{host}:{port}{db_part}"),
             DatabaseType::Gbase => format!("gbase://{host}:{port}{db_part}"),
             DatabaseType::H2 => format!("h2://{host}:{port}{db_part}"),
             DatabaseType::Snowflake => format!("snowflake://{host}/{db_part}"),
@@ -691,7 +750,14 @@ impl ConnectionConfig {
                     format!("{base}?{params}")
                 }
             }
+            DatabaseType::Etcd => {
+                format!("etcd://{host}:{port}")
+            }
             DatabaseType::Iris => format!("iris://{host}:{port}{db_part}"),
+            DatabaseType::InfluxDb => {
+                let scheme = if self.ssl { "https" } else { "http" };
+                format!("{scheme}://{host}:{port}")
+            }
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
         }
     }
@@ -720,7 +786,11 @@ impl ConnectionConfig {
                     format!("{scheme}://{username}:{password}@{host}:{port}/{fragment}")
                 }
             }
-            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Databend => {
+            DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
+            | DatabaseType::Databend => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
                 format!("mysql://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
             }
@@ -730,6 +800,7 @@ impl ConnectionConfig {
             }
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
+            DatabaseType::Turso => turso_http_url(self, raw_host, port),
             DatabaseType::SqlServer => format!(
                 "server=tcp:{host},{port};user={};password={};database={}",
                 self.username,
@@ -752,13 +823,10 @@ impl ConnectionConfig {
                         suffix.push_str("&directConnection=true");
                     }
                 }
-                let scheme = if self.ssl { "mongodb+srv" } else { "mongodb" };
-                // SRV URLs resolve the port via DNS SRV records, so we omit the explicit port.
-                let addr = if self.ssl { host.to_string() } else { format!("{host}:{port}") };
                 if self.username.is_empty() {
-                    format!("{scheme}://{addr}{db_part}{suffix}")
+                    format!("mongodb://{host}:{port}{db_part}{suffix}")
                 } else {
-                    format!("{scheme}://{username}:{password}@{addr}{db_part}{suffix}")
+                    format!("mongodb://{username}:{password}@{host}:{port}{db_part}{suffix}")
                 }
             }
             DatabaseType::Oracle => {
@@ -821,6 +889,9 @@ impl ConnectionConfig {
                     format!("{base}?{params}")
                 }
             }
+            DatabaseType::Questdb => {
+                format!("questdb://{}:{}@{host}:{port}{db_part}", username, password)
+            }
             DatabaseType::Gbase => {
                 format!("gbase://{}:{}@{host}:{port}{db_part}", username, password)
             }
@@ -871,8 +942,19 @@ impl ConnectionConfig {
                     format!("{base}?{params}")
                 }
             }
+            DatabaseType::Etcd => {
+                if self.username.is_empty() {
+                    format!("etcd://{host}:{port}")
+                } else {
+                    format!("etcd://{}:{}@{host}:{port}", username, password)
+                }
+            }
             DatabaseType::Iris => {
                 format!("iris://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::InfluxDb => {
+                let scheme = if self.ssl { "https" } else { "http" };
+                format!("{scheme}://{host}:{port}")
             }
             DatabaseType::Jdbc => {
                 self.connection_string.as_deref().filter(|value| !value.is_empty()).unwrap_or("jdbc:").to_string()
@@ -886,18 +968,24 @@ impl ConnectionConfig {
             return normalize_bare_mysql_url_params(value);
         }
         match self.db_type {
-            DatabaseType::Mysql => normalize_mysql_url_params(value, self.ssl, self.ca_cert_path.trim().is_empty()),
-            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Databend => {
+            DatabaseType::Mysql => {
+                normalize_mysql_url_params(value, self.mysql_uses_tls(), self.ca_cert_path.trim().is_empty())
+            }
+            DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch | DatabaseType::Databend => {
                 normalize_bare_mysql_url_params(value)
             }
             DatabaseType::Postgres | DatabaseType::Redshift => normalize_postgres_url_params(value, self.ssl),
-            DatabaseType::MongoDb => value.trim_start_matches('?').to_string(),
+            DatabaseType::MongoDb => normalize_mongo_url_params(value, self.ssl),
             _ => value.trim_start_matches('?').to_string(),
         }
     }
 
     pub fn clickhouse_uses_tls(&self) -> bool {
         self.ssl || url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
+    }
+
+    fn mysql_uses_tls(&self) -> bool {
+        self.ssl || self.host.to_ascii_lowercase().ends_with(".tidbcloud.com")
     }
 
     fn redis_tls_insecure_fragment(&self) -> &'static str {
@@ -952,10 +1040,12 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
     let mut parts: Vec<String> = value.split('&').filter(|part| !part.is_empty()).map(str::to_string).collect();
 
     if force_tls {
-        parts.retain(|part| !url_param_key_is(part, "ssl-mode") && !url_param_key_is(part, "sslmode"));
-        if !parts.iter().any(|part| url_param_key_is(part, "require_ssl")) {
-            parts.insert(0, "require_ssl=true".to_string());
-        }
+        parts.retain(|part| {
+            !url_param_key_is(part, "ssl-mode")
+                && !url_param_key_is(part, "sslmode")
+                && !url_param_key_is(part, "require_ssl")
+        });
+        parts.insert(0, "require_ssl=true".to_string());
         if accept_invalid_certs && !parts.iter().any(|part| url_param_key_is(part, "verify_ca")) {
             parts.push("verify_ca=false".to_string());
         }
@@ -970,6 +1060,18 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
 
     if !parts.iter().any(|part| url_param_key_is(part, "charset")) {
         parts.push("charset=utf8mb4".to_string());
+    }
+
+    parts.join("&")
+}
+
+fn normalize_mongo_url_params(value: &str, force_tls: bool) -> String {
+    let value = value.trim_start_matches('?');
+    let mut parts: Vec<String> = value.split('&').filter(|part| !part.is_empty()).map(str::to_string).collect();
+
+    if force_tls {
+        parts.retain(|part| !url_param_key_is(part, "tls") && !url_param_key_is(part, "ssl"));
+        parts.insert(0, "tls=true".to_string());
     }
 
     parts.join("&")
@@ -1089,6 +1191,30 @@ fn rqlite_http_url(config: &ConnectionConfig, host: &str, port: u16) -> String {
         return format!("{scheme}://{}", trim_http_host_port(rest, port));
     }
     let scheme = if config.ssl { "https" } else { "http" };
+    format!("{scheme}://{}:{port}", bracket_ipv6(trimmed))
+}
+
+fn turso_http_url(config: &ConnectionConfig, host: &str, port: u16) -> String {
+    let trimmed = host.trim();
+
+    // Handle libsql:// protocol (Turso native)
+    if let Some(rest) = trimmed.strip_prefix("libsql://") {
+        return format!("https://{}", trim_http_host_port(rest, port));
+    }
+
+    // Handle explicit https://
+    if let Some(rest) = trimmed.strip_prefix("https://") {
+        return format!("https://{}", trim_http_host_port(rest, port));
+    }
+
+    // Handle explicit http:// (respect ssl config)
+    if let Some(rest) = trimmed.strip_prefix("http://") {
+        let scheme = if config.ssl { "https" } else { "http" };
+        return format!("{scheme}://{}", trim_http_host_port(rest, port));
+    }
+
+    // Default: bare hostname -> prefer HTTPS for Turso (default port 443)
+    let scheme = if port == 443 || config.ssl { "https" } else { "http" };
     format!("{scheme}://{}:{port}", bracket_ipv6(trimmed))
 }
 
@@ -1262,8 +1388,8 @@ fn bracket_ipv6(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_query_timeout_secs, default_ssh_connect_timeout_secs, ConnectionConfig, DatabaseType,
-        ProxyTunnelConfig, ProxyType, TransportLayerConfig,
+        default_query_timeout_secs, default_redis_key_separator, default_ssh_connect_timeout_secs, ConnectionConfig,
+        DatabaseType, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
     };
     use std::str::FromStr;
 
@@ -1286,8 +1412,11 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
+            idle_timeout_secs: super::default_idle_timeout_secs(),
             ssl: false,
             ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
             sysdba: false,
             oracle_connection_type: None,
             connection_string: None,
@@ -1298,10 +1427,14 @@ mod tests {
             redis_sentinel_password: String::new(),
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
+            redis_key_separator: default_redis_key_separator(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            read_only: false,
         }
     }
 
@@ -1630,6 +1763,19 @@ mod tests {
     }
 
     #[test]
+    fn tidb_cloud_mysql_url_requires_tls() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.host = "gateway01.us-west-2.prod.aws.tidbcloud.com".to_string();
+        config.port = 4000;
+        config.url_params = Some("require_ssl=false&charset=utf8mb4".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@gateway01.us-west-2.prod.aws.tidbcloud.com:4000/test?require_ssl=true&charset=utf8mb4&verify_ca=false&verify_identity=false"
+        );
+    }
+
+    #[test]
     fn postgres_url_appends_custom_params() {
         let mut config = mysql_config("postgres", "secret", Some("test"));
         config.db_type = DatabaseType::Postgres;
@@ -1875,6 +2021,24 @@ mod tests {
         assert_eq!(url, "mongodb://10.1.2.3:17000/admin?authSource=admin&authMechanism=SCRAM-SHA-1");
         assert!(!url.contains("root"));
         assert!(!url.contains("secret"));
+    }
+
+    #[test]
+    fn mongodb_form_tls_uses_standard_scheme_and_tls_param() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.ssl = true;
+
+        assert_eq!(config.connection_url(), "mongodb://root:secret@10.1.2.3:17000/admin?tls=true");
+        assert_eq!(config.redacted_connection_url(), "mongodb://10.1.2.3:17000/admin?tls=true");
+    }
+
+    #[test]
+    fn mongodb_form_tls_replaces_existing_tls_params() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.ssl = true;
+        config.url_params = Some("authSource=admin&ssl=false&tls=false".to_string());
+
+        assert_eq!(config.connection_url(), "mongodb://root:secret@10.1.2.3:17000/admin?tls=true&authSource=admin");
     }
 
     #[test]

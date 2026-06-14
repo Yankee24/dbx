@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "vitest";
 import {
   SCHEMA_AWARE_TYPES,
   TREE_SCHEMA_TYPES,
+  databaseProductCapabilities,
+  databaseSupportLevel,
   databaseObjectTreeNodeSchema,
   databaseObjectTreeQuerySchema,
   getDatabaseCapability,
+  manifestDatabaseTypes,
+  sidebarObjectKindsForDatabase,
   supportsDatabaseCreation,
   supportsDatabaseSearch,
   supportsDriverManagement,
@@ -60,17 +64,7 @@ test("treats Access as a local single-database agent driver", () => {
 });
 
 test("exposes the extended JDBC agent ecosystem through driver management", () => {
-  for (const dbType of [
-    "databricks",
-    "saphana",
-    "teradata",
-    "vertica",
-    "firebird",
-    "exasol",
-    "opengauss",
-    "oceanbase-oracle",
-    "gbase",
-  ] as const) {
+  for (const dbType of ["databricks", "saphana", "teradata", "vertica", "firebird", "exasol", "opengauss", "oceanbase-oracle", "gbase", "questdb"] as const) {
     assert.equal(supportsDriverManagement(dbType), true, `${dbType} should be agent-managed`);
     assert.equal(supportsDatabaseSearch(dbType), true, `${dbType} should support database search`);
   }
@@ -131,6 +125,15 @@ test("describes table editing capabilities for special database engines", () => 
     updateRequiresPrimaryKey: true,
     deleteRequiresPrimaryKey: true,
     keylessRowPredicate: false,
+    requiresTransactionalTableForExistingRows: false,
+    transaction: false,
+  });
+
+  assert.deepEqual(getDatabaseCapability("manticoresearch").tableData, {
+    insert: true,
+    updateRequiresPrimaryKey: false,
+    deleteRequiresPrimaryKey: false,
+    keylessRowPredicate: true,
     requiresTransactionalTableForExistingRows: false,
     transaction: false,
   });
@@ -229,9 +232,13 @@ test("describes feature support through capability helpers", () => {
   assert.equal(supportsTableStructureEditing("opengauss"), true);
   assert.equal(supportsTableStructureEditing("redshift"), true);
   assert.equal(supportsTableStructureEditing("clickhouse"), true);
+  assert.equal(supportsTableStructureEditing("gbase"), true);
+  assert.equal(supportsTableStructureEditing("informix"), true);
   assert.equal(supportsTableStructureEditing("rqlite"), true);
   assert.equal(supportsTableStructureEditing("mongodb"), false);
+  assert.equal(supportsTableStructureEditing("manticoresearch"), true);
   assert.equal(supportsDatabaseCreation("clickhouse"), true);
+  assert.equal(supportsDatabaseCreation("manticoresearch"), false);
   assert.equal(supportsDatabaseCreation("sqlite"), false);
   assert.equal(supportsFieldLineage("gaussdb"), true);
   assert.equal(supportsFieldLineage("kwdb"), true);
@@ -239,22 +246,65 @@ test("describes feature support through capability helpers", () => {
   assert.equal(supportsTransfer("duckdb"), true);
   assert.equal(supportsTransfer("hive"), true);
   assert.equal(supportsTransfer("mongodb"), true);
+  assert.equal(supportsTransfer("manticoresearch"), false);
   assert.equal(supportsDriverManagement("oracle"), true);
   assert.equal(supportsDriverManagement("mysql"), false);
+  assert.equal(supportsDriverManagement("manticoresearch"), false);
   assert.equal(supportsDriverManagement("kwdb"), false);
   assert.equal(usesPostgresLikeStructureCopy("gaussdb"), true);
   assert.equal(usesPostgresLikeStructureCopy("kwdb"), true);
   assert.equal(usesPostgresLikeStructureCopy("mysql"), false);
   assert.equal(supportsObjectBrowser("mysql"), true);
+  assert.equal(supportsObjectBrowser("manticoresearch"), false);
   assert.equal(supportsObjectBrowser("mongodb"), false);
   assert.equal(supportsTableTruncate("mysql"), true);
+  assert.equal(supportsTableTruncate("manticoresearch"), false);
   assert.equal(supportsTableTruncate("duckdb"), false);
   assert.equal(supportsTableTruncate("rqlite"), false);
 });
 
-test("exposes Hive and MongoDB in data transfer", () => {
-  assert.equal(supportsTransfer("hive"), true);
-  assert.equal(supportsTransfer("mongodb"), true);
+test("loads product support levels and capabilities from the driver manifest", () => {
+  assert.equal(manifestDatabaseTypes().includes("mysql"), true);
+  assert.equal(databaseSupportLevel("mysql"), "operate");
+  assert.equal(databaseSupportLevel("manticoresearch"), "operate");
+  assert.equal(databaseSupportLevel("jdbc"), "browse");
+  assert.equal(databaseSupportLevel("redis"), "connect");
+
+  assert.deepEqual(
+    {
+      metadataBrowse: databaseProductCapabilities("jdbc").metadataBrowse,
+      objectBrowser: databaseProductCapabilities("jdbc").objectBrowser,
+      tableStructureEdit: databaseProductCapabilities("jdbc").tableStructureEdit,
+      userAdmin: databaseProductCapabilities("jdbc").userAdmin,
+    },
+    {
+      metadataBrowse: true,
+      objectBrowser: true,
+      tableStructureEdit: false,
+      userAdmin: false,
+    },
+  );
+
+  assert.deepEqual(
+    {
+      queryExecution: databaseProductCapabilities("manticoresearch").queryExecution,
+      metadataBrowse: databaseProductCapabilities("manticoresearch").metadataBrowse,
+      objectBrowser: databaseProductCapabilities("manticoresearch").objectBrowser,
+      tableDataEdit: databaseProductCapabilities("manticoresearch").tableDataEdit,
+      tableStructureEdit: databaseProductCapabilities("manticoresearch").tableStructureEdit,
+      sqlFileExecution: databaseProductCapabilities("manticoresearch").sqlFileExecution,
+      userAdmin: databaseProductCapabilities("manticoresearch").userAdmin,
+    },
+    {
+      queryExecution: true,
+      metadataBrowse: true,
+      objectBrowser: false,
+      tableDataEdit: true,
+      tableStructureEdit: true,
+      sqlFileExecution: true,
+      userAdmin: false,
+    },
+  );
 });
 
 test("object browser entry follows database tree shape", () => {
@@ -265,4 +315,11 @@ test("object browser entry follows database tree shape", () => {
   assert.equal(supportsObjectBrowserTreeNode("mysql", "database"), true);
   assert.equal(supportsObjectBrowserTreeNode("jdbc", "database"), true);
   assert.equal(supportsObjectBrowserTreeNode("mongodb", "database"), false);
+});
+
+test("sidebar object capability registry describes object groups by database type", () => {
+  assert.deepEqual(sidebarObjectKindsForDatabase("databend"), ["TABLE", "VIEW"]);
+  assert.deepEqual(sidebarObjectKindsForDatabase("manticoresearch"), ["TABLE", "FUNCTION"]);
+  assert.deepEqual(sidebarObjectKindsForDatabase("postgres"), ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"]);
+  assert.deepEqual(sidebarObjectKindsForDatabase("oracle"), ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"]);
 });

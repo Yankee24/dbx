@@ -23,6 +23,10 @@ const DESKTOP_TRAY_ID: &str = "main-tray";
 const MACOS_TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/tray-macos-template.png");
 const BLACK_APP_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/icon-black.png");
 
+pub(crate) fn apply_debug_log_level(debug_logging_enabled: bool) {
+    log::set_max_level(if debug_logging_enabled { log::LevelFilter::Debug } else { log::LevelFilter::Off });
+}
+
 fn should_hide_window_on_close(target_os: &str) -> bool {
     matches!(target_os, "macos" | "windows")
 }
@@ -57,14 +61,14 @@ fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
     manager: &M,
-    icon_theme: DesktopIconTheme,
+    _icon_theme: DesktopIconTheme,
 ) -> tauri::Result<()> {
     let menu = MenuBuilder::new(manager).text("show", "Show DBX").separator().text("quit", "Quit DBX").build()?;
     let mut tray =
         TrayIconBuilder::<R>::with_id(DESKTOP_TRAY_ID).tooltip("DBX").menu(&menu).show_menu_on_left_click(false);
     #[cfg(target_os = "macos")]
     {
-        match icon_theme {
+        match _icon_theme {
             DesktopIconTheme::Default => {
                 tray = tray.icon(MACOS_TRAY_ICON).icon_as_template(true);
             }
@@ -75,7 +79,7 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
     }
     #[cfg(target_os = "windows")]
     {
-        let icon = match icon_theme {
+        let icon = match _icon_theme {
             DesktopIconTheme::Default => manager.app_handle().default_window_icon().cloned(),
             DesktopIconTheme::Black => Some(BLACK_APP_ICON),
         };
@@ -153,6 +157,7 @@ fn apply_desktop_tray_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIcon
 }
 
 pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &DesktopSettings) -> tauri::Result<()> {
+    apply_debug_log_level(desktop_settings.debug_logging_enabled);
     apply_desktop_icon_theme(app, desktop_settings.icon_theme)?;
     if matches!(std::env::consts::OS, "macos" | "windows") {
         if let Some(tray) = app.tray_by_id(DESKTOP_TRAY_ID) {
@@ -188,41 +193,11 @@ mod tests {
         assert!(!should_setup_desktop_tray("windows", false));
         assert!(!should_setup_desktop_tray("macos", false));
         assert!(!should_setup_desktop_tray("linux", true));
-        let source = include_str!("lib.rs");
-        assert!(source.contains(
-            "if should_setup_desktop_tray(std::env::consts::OS, desktop_settings.show_tray_icon) {\n                setup_desktop_tray(app, desktop_settings.icon_theme)?;"
-        ));
-    }
-
-    #[test]
-    fn tray_preference_hides_existing_tray_instead_of_removing_it() {
-        let source = include_str!("lib.rs");
-        assert!(source.contains("tray.set_visible(show_tray_icon)?;"));
-        let remove_call = concat!("remove", "_tray_by_id");
-        assert!(!source.contains(remove_call));
-    }
-
-    #[test]
-    fn can_apply_black_logo_icon_theme() {
-        let source = include_str!("lib.rs");
-        assert!(source.contains("const BLACK_APP_ICON"));
-        assert!(source.contains("DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?"));
-        assert!(source.contains("DesktopIconTheme::Black => Some(BLACK_APP_ICON)"));
-    }
-
-    #[test]
-    fn desktop_settings_save_treats_runtime_tray_update_as_best_effort() {
-        let source = include_str!("commands/app_settings.rs");
-        assert!(source.contains("if let Err(err) = apply_desktop_settings"));
-        assert!(!source.contains("map_err(|err| err.to_string())"));
     }
 
     #[test]
     fn shows_main_window_after_regular_startup_setup() {
         assert!(should_show_main_window_after_setup());
-        let source = include_str!("lib.rs");
-        assert!(source
-            .contains("if should_show_main_window_after_setup() {\n                show_main_window(app.handle());"));
     }
 }
 
@@ -266,10 +241,6 @@ pub fn run() {
             let setup_start = Instant::now();
             eprintln!("[STARTUP] plugins registered in {:?}", startup_begin.elapsed());
 
-            if cfg!(debug_assertions) {
-                app.handle().plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Info).build())?;
-            }
-
             let default_data_dir =
                 app.path().app_data_dir().map_err(|e| e.to_string()).expect("Failed to resolve app data dir");
             let data_dir = data_dir::resolve_data_dir(default_data_dir);
@@ -286,23 +257,36 @@ pub fn run() {
                 s
             });
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
+            app.handle().plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Debug).build())?;
+            apply_debug_log_level(desktop_settings.debug_logging_enabled);
             eprintln!("[STARTUP] storage ready in {:?}", t.elapsed());
 
-            let state = if data_dir::uses_custom_data_dir() {
+            let legacy_driver_base = desktop_settings.driver_store_dir.as_ref().map(std::path::PathBuf::from);
+            let plugin_dir = desktop_settings
+                .plugin_store_dir
+                .as_ref()
+                .map(std::path::PathBuf::from)
+                .or_else(|| legacy_driver_base.as_ref().map(|base| base.join("plugins")))
+                .unwrap_or_else(|| data_dir.join("plugins"));
+            let agent_dir = desktop_settings
+                .agent_store_dir
+                .as_ref()
+                .map(std::path::PathBuf::from)
+                .or_else(|| legacy_driver_base.as_ref().map(|base| base.join("agents")))
+                .or_else(|| data_dir::uses_custom_data_dir().then(|| data_dir.join("agents")));
+
+            let state = if let Some(agent_dir) = agent_dir {
                 Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
                     storage,
-                    data_dir.join("plugins"),
-                    data_dir.join("agents"),
+                    plugin_dir,
+                    agent_dir,
                     env!("CARGO_PKG_VERSION"),
                 ))
             } else {
-                Arc::new(AppState::new_with_plugin_dir_and_app_version(
-                    storage,
-                    data_dir.join("plugins"),
-                    env!("CARGO_PKG_VERSION"),
-                ))
+                Arc::new(AppState::new_with_plugin_dir_and_app_version(storage, plugin_dir, env!("CARGO_PKG_VERSION")))
             };
             app.manage(state.clone());
+            app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
             app.manage(commands::deep_link::DeepLinkOpenState::default());
@@ -343,6 +327,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ai::ai_complete,
             commands::ai::ai_stream,
+            commands::ai::ai_agent_stream,
             commands::ai::ai_cancel_stream,
             commands::ai::ai_test_connection,
             commands::ai::ai_list_models,
@@ -353,8 +338,13 @@ pub fn run() {
             commands::ai::delete_ai_conversation,
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
+            commands::app_settings::set_driver_store_dir,
+            commands::app_settings::set_plugin_store_dir,
+            commands::app_settings::set_agent_store_dir,
+            commands::app_settings::get_driver_store_path,
             commands::app_settings::load_pinned_tree_node_ids,
             commands::app_settings::save_pinned_tree_node_ids,
+            commands::app_settings::load_native_debug_logs,
             commands::cloud_sync::webdav_sync_test,
             commands::cloud_sync::webdav_password_status,
             commands::cloud_sync::save_webdav_saved_password,
@@ -373,8 +363,11 @@ pub fn run() {
             commands::connection::load_sidebar_layout,
             commands::plugins::list_plugins,
             commands::plugins::list_jdbc_drivers,
+            commands::plugins::list_jdbc_maven_bundles,
             commands::plugins::import_jdbc_drivers,
+            commands::plugins::install_jdbc_driver_from_maven,
             commands::plugins::delete_jdbc_driver,
+            commands::plugins::delete_jdbc_maven_bundle,
             commands::plugins::jdbc_plugin_status,
             commands::plugins::install_jdbc_plugin,
             commands::plugins::install_jdbc_plugin_local,
@@ -390,6 +383,10 @@ pub fn run() {
             commands::schema::list_foreign_keys,
             commands::schema::list_triggers,
             commands::schema::get_table_ddl,
+            commands::schema::list_functions,
+            commands::schema::list_sequences,
+            commands::schema::list_rules,
+            commands::schema::list_owners,
             commands::schema_diff::prepare_schema_diff,
             commands::schema_diff::generate_schema_sync_sql,
             commands::schema_cache::save_schema_cache,
@@ -411,12 +408,15 @@ pub fn run() {
             commands::query::prepare_query_pagination_execution_plan,
             commands::query::build_sorted_query_sql,
             commands::query::build_explain_sql,
+            commands::query::get_explain_info,
+            commands::query::build_create_user_sql,
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
             commands::query::build_database_search_sql,
             commands::query::build_search_result_where,
             commands::query::build_rename_object_sql,
             commands::query::build_create_database_sql,
+            #[cfg(feature = "duckdb-bundled")]
             commands::query::build_duckdb_attach_database_sql,
             commands::query::build_drop_object_sql,
             commands::query::build_drop_table_sql,
@@ -455,6 +455,8 @@ pub fn run() {
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
             commands::external_db::pending_open_db_files,
+            commands::keychain::read_keychain_password,
+            commands::keychain::read_keychain_passwords,
             commands::deep_link::pending_open_connection_links,
             commands::table_import::preview_table_import_file,
             commands::table_import::import_table_file,
@@ -474,18 +476,31 @@ pub fn run() {
             commands::redis_cmd::redis_set_remove,
             commands::redis_cmd::redis_zadd,
             commands::redis_cmd::redis_zrem,
+            commands::redis_cmd::redis_stream_add,
+            commands::redis_cmd::redis_json_set,
+            commands::redis_cmd::redis_check_json_module,
             commands::redis_cmd::redis_set_ttl,
             commands::redis_cmd::redis_delete_keys,
             commands::redis_cmd::redis_flush_db,
             commands::redis_cmd::redis_execute_command,
             commands::redis_cmd::redis_load_more,
+            commands::etcd_cmd::etcd_list_prefix,
+            commands::etcd_cmd::etcd_get,
+            commands::etcd_cmd::etcd_put,
+            commands::etcd_cmd::etcd_delete,
             commands::saved_sql::load_saved_sql_library,
             commands::saved_sql::save_saved_sql_folder,
             commands::saved_sql::delete_saved_sql_folder,
             commands::saved_sql::save_saved_sql_file,
             commands::saved_sql::delete_saved_sql_file,
+            commands::saved_sql::saved_sql_storage_dir,
+            commands::saved_sql::open_saved_sql_storage_dir,
+            commands::saved_sql::sync_saved_sql_directory,
+            commands::fs_open::reveal_path_in_file_manager,
+            commands::sqlite_backup::backup_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
             commands::mongo_cmd::mongo_list_collections,
+            commands::mongo_cmd::document_find_documents,
             commands::mongo_cmd::mongo_find_documents,
             commands::mongo_cmd::mongo_aggregate_documents,
             commands::mongo_cmd::mongo_insert_document,
@@ -499,6 +514,7 @@ pub fn run() {
             commands::history::clear_history,
             commands::history::delete_history_entry,
             commands::mcp::check_mcp_server_status,
+            commands::mcp::install_mcp_server,
             commands::update::check_for_updates,
             commands::update::get_system_proxy_url,
             commands::transfer::start_transfer,

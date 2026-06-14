@@ -12,7 +12,7 @@ use data_grid_tdengine_sql::build_tdengine_data_grid_save_statements;
 
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::quote_table_identifier;
-use crate::transfer::format_pg_array_sql_literal;
+use crate::transfer::{format_ch_array_sql_literal, format_pg_array_sql_literal};
 
 const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
 pub(crate) const DBX_NEO4J_ELEMENT_ID_COLUMN: &str = "__DBX_ELEMENT_ID";
@@ -252,7 +252,10 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
             })
             .collect::<Vec<_>>()
             .join(" AND ");
-        statements.push(format!("UPDATE {table} SET {sets} WHERE {where_clause};"));
+        statements.push(data_grid_statement(
+            options.database_type,
+            format!("UPDATE {table} SET {sets} WHERE {where_clause}"),
+        ));
     }
     statements
 }
@@ -528,7 +531,10 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
             row,
             column_info,
         );
-        statements.push(format!("UPDATE {table} SET {sets} WHERE {where_clause};"));
+        statements.push(data_grid_statement(
+            options.database_type,
+            format!("UPDATE {table} SET {sets} WHERE {where_clause}"),
+        ));
     }
 
     for row_index in &options.deleted_rows {
@@ -542,7 +548,8 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
             row,
             column_info,
         );
-        statements.push(format!("DELETE FROM {table} WHERE {where_clause};"));
+        statements
+            .push(data_grid_statement(options.database_type, format!("DELETE FROM {table} WHERE {where_clause}")));
     }
 
     for row in &options.new_rows {
@@ -568,7 +575,10 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
             })
             .collect::<Vec<_>>()
             .join(", ");
-        statements.push(format!("INSERT INTO {table} ({columns}) VALUES ({values});"));
+        statements.push(data_grid_statement(
+            options.database_type,
+            format!("INSERT INTO {table} ({columns}) VALUES ({values})"),
+        ));
     }
 
     statements
@@ -591,7 +601,8 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
     for row in &options.new_rows {
         let where_clause = build_row_where(options.database_type, &save_columns, row, column_info);
         if !where_clause.is_empty() {
-            statements.push(format!("DELETE FROM {table} WHERE {where_clause};"));
+            statements
+                .push(data_grid_statement(options.database_type, format!("DELETE FROM {table} WHERE {where_clause}")));
         }
     }
 
@@ -617,7 +628,10 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
             })
             .collect::<Vec<_>>()
             .join(", ");
-        statements.push(format!("INSERT INTO {table} ({columns}) VALUES ({values});"));
+        statements.push(data_grid_statement(
+            options.database_type,
+            format!("INSERT INTO {table} ({columns}) VALUES ({values})"),
+        ));
     }
 
     for (row_index, changes) in &options.dirty_rows {
@@ -668,9 +682,12 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
         predicates.extend(writable_changes.iter().map(|((_, value), column)| {
             build_column_predicate(options.database_type, column, value, column_info_for(column_info, column))
         }));
-        statements.push(format!(
-            "UPDATE {table} SET {sets} WHERE {};",
-            predicates.into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" AND ")
+        statements.push(data_grid_statement(
+            options.database_type,
+            format!(
+                "UPDATE {table} SET {sets} WHERE {}",
+                predicates.into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" AND ")
+            ),
         ));
     }
 
@@ -743,9 +760,17 @@ pub fn format_grid_sql_literal(
         return number.to_string();
     }
     if let Some(arr) = value.as_array() {
+        if matches!(database_type, Some(DatabaseType::ClickHouse) | Some(DatabaseType::Databend)) {
+            return format_ch_array_sql_literal(arr);
+        }
         return format_pg_array_sql_literal(arr);
     }
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    if database_type == Some(DatabaseType::ManticoreSearch) {
+        if let Some(typed_value) = manticore_typed_attribute_value(&text, column_info) {
+            return format_grid_sql_literal(&typed_value, database_type, column_info);
+        }
+    }
     if text.is_empty() {
         return if database_type == Some(DatabaseType::SqlServer) { "N''" } else { "''" }.to_string();
     }
@@ -774,6 +799,20 @@ fn is_mysql_bit_literal_column(database_type: Option<DatabaseType>, column_info:
 fn is_bit_column_type(data_type: &str) -> bool {
     let lower = data_type.to_ascii_lowercase();
     lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| token == "bit")
+}
+
+fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColumnInfo>) -> Option<Value> {
+    let data_type = column_info?.data_type.to_ascii_lowercase();
+    if is_boolean_type(&data_type) && text.eq_ignore_ascii_case("true") {
+        return Some(Value::Bool(true));
+    }
+    if is_boolean_type(&data_type) && text.eq_ignore_ascii_case("false") {
+        return Some(Value::Bool(false));
+    }
+    if is_numeric_type(&data_type) && is_numeric_literal(text) {
+        return text.parse::<serde_json::Number>().ok().map(Value::Number);
+    }
+    None
 }
 
 fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
@@ -1029,6 +1068,14 @@ fn build_column_predicate(
     }
 }
 
+fn data_grid_statement(database_type: Option<DatabaseType>, sql: String) -> String {
+    if database_type == Some(DatabaseType::ManticoreSearch) {
+        sql
+    } else {
+        format!("{sql};")
+    }
+}
+
 fn uses_mysql_binary_text_predicate(
     database_type: Option<DatabaseType>,
     value: &Value,
@@ -1247,6 +1294,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
         database_type,
         Some(
             DatabaseType::Mysql
+                | DatabaseType::ManticoreSearch
                 | DatabaseType::Postgres
                 | DatabaseType::Sqlite
                 | DatabaseType::DuckDb
@@ -1270,6 +1318,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Firebird
                 | DatabaseType::Exasol
                 | DatabaseType::OpenGauss
+                | DatabaseType::Questdb
                 | DatabaseType::OceanbaseOracle
                 | DatabaseType::Gbase
                 | DatabaseType::Access
@@ -1566,6 +1615,35 @@ mod tests {
     }
 
     #[test]
+    fn prepares_manticore_save_statements_without_trailing_semicolons() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ManticoreSearch),
+            table_meta: DataGridTableMeta {
+                schema: None,
+                table_name: "rt_products".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "bigint", false, None), column("title", "text", true, None)]),
+            },
+            columns: vec!["id".to_string(), "title".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("1"), json!("old")], vec![json!("2"), json!("deleted")]],
+            dirty_rows: vec![(0, vec![(1, json!("new"))])],
+            deleted_rows: vec![1],
+            new_rows: vec![vec![json!("3"), json!("inserted")]],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `rt_products` SET `title` = 'new' WHERE `id` = 1 AND `title` = 'old'",
+                "DELETE FROM `rt_products` WHERE `id` = 2 AND `title` = 'deleted'",
+                "INSERT INTO `rt_products` (`id`, `title`) VALUES (3, 'inserted')",
+            ]
+        );
+        assert!(result.rollback_statements.iter().all(|statement| !statement.ends_with(';')));
+    }
+
+    #[test]
     fn validates_duplicate_inserted_primary_keys() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Postgres),
@@ -1587,6 +1665,95 @@ mod tests {
             result.validation_error,
             Some(r#"New row duplicates the existing primary key (country_code = "ALB", year = 2021). Change the key before saving."#.to_string())
         );
+        assert!(result.statements.is_empty());
+    }
+
+    fn pk_column(name: &str, data_type: &str, nullable: bool, extra: Option<&str>) -> DataGridColumnInfo {
+        DataGridColumnInfo {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            is_nullable: nullable,
+            is_primary_key: true,
+            column_default: None,
+            extra: extra.map(ToString::to_string),
+        }
+    }
+
+    #[test]
+    fn prepare_data_grid_save_skips_sqlite_autoincrement_pk_validation() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Sqlite),
+            table_meta: DataGridTableMeta {
+                schema: None,
+                table_name: "OnlineLogs".to_string(),
+                primary_keys: vec!["OnlineLogId".to_string()],
+                columns: Some(vec![
+                    pk_column("OnlineLogId", "INTEGER", false, Some("autoincrement")),
+                    column("LogTime", "TEXT", false, None),
+                ]),
+            },
+            columns: vec!["OnlineLogId".to_string(), "LogTime".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("2026-06-12T00:00:00Z")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec![r#"INSERT INTO "OnlineLogs" ("LogTime") VALUES ('2026-06-12T00:00:00Z');"#]);
+    }
+
+    #[test]
+    fn prepare_data_grid_save_includes_explicit_sqlite_pk_value() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Sqlite),
+            table_meta: DataGridTableMeta {
+                schema: None,
+                table_name: "OnlineLogs".to_string(),
+                primary_keys: vec!["OnlineLogId".to_string()],
+                columns: Some(vec![
+                    pk_column("OnlineLogId", "INTEGER", false, Some("autoincrement")),
+                    column("LogTime", "TEXT", false, None),
+                ]),
+            },
+            columns: vec!["OnlineLogId".to_string(), "LogTime".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(42), json!("2026-06-12T00:00:00Z")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![r#"INSERT INTO "OnlineLogs" ("OnlineLogId", "LogTime") VALUES (42, '2026-06-12T00:00:00Z');"#]
+        );
+    }
+
+    #[test]
+    fn prepare_data_grid_save_still_validates_other_not_null_columns_in_sqlite() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Sqlite),
+            table_meta: DataGridTableMeta {
+                schema: None,
+                table_name: "OnlineLogs".to_string(),
+                primary_keys: vec!["OnlineLogId".to_string()],
+                columns: Some(vec![
+                    pk_column("OnlineLogId", "INTEGER", false, Some("autoincrement")),
+                    column("LogTime", "TEXT", false, None),
+                ]),
+            },
+            columns: vec!["OnlineLogId".to_string(), "LogTime".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, Value::Null]],
+        });
+
+        assert_eq!(result.validation_error, Some(r#"Column "LogTime" does not allow NULL."#.to_string()));
         assert!(result.statements.is_empty());
     }
 }

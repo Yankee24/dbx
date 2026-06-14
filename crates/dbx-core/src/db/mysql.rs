@@ -29,8 +29,12 @@ impl MySqlQueryDialect {
     pub fn for_connection(db_type: DatabaseType, driver_profile: Option<&str>) -> Self {
         let profile = driver_profile.map(str::to_ascii_lowercase);
         Self {
-            supports_admin_show_results: matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks)
-                || profile.as_deref().is_some_and(|profile| matches!(profile, "doris" | "selectdb" | "starrocks")),
+            supports_admin_show_results: matches!(
+                db_type,
+                DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch
+            ) || profile
+                .as_deref()
+                .is_some_and(|profile| matches!(profile, "doris" | "selectdb" | "starrocks" | "manticoresearch")),
         }
     }
 }
@@ -187,6 +191,42 @@ fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_js
     serde_json::Value::String(String::from_utf8_lossy(&bytes).to_string())
 }
 
+/// Map a MySQL column to a user-facing type name for the result-grid header.
+/// Returns the bare lowercase type name (no length/precision/signedness), which
+/// is enough for display; unknown variants fall back to a lowercased debug name.
+fn mysql_column_type_name(ty: ColumnType) -> String {
+    use mysql_async::consts::ColumnType::*;
+    match ty {
+        MYSQL_TYPE_TINY => "tinyint",
+        MYSQL_TYPE_SHORT => "smallint",
+        MYSQL_TYPE_INT24 => "mediumint",
+        MYSQL_TYPE_LONG => "int",
+        MYSQL_TYPE_LONGLONG => "bigint",
+        MYSQL_TYPE_FLOAT => "float",
+        MYSQL_TYPE_DOUBLE => "double",
+        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => "decimal",
+        MYSQL_TYPE_BIT => "bit",
+        MYSQL_TYPE_YEAR => "year",
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => "date",
+        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => "time",
+        MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => "datetime",
+        MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => "timestamp",
+        MYSQL_TYPE_JSON => "json",
+        MYSQL_TYPE_ENUM => "enum",
+        MYSQL_TYPE_SET => "set",
+        MYSQL_TYPE_TINY_BLOB => "tinyblob",
+        MYSQL_TYPE_MEDIUM_BLOB => "mediumblob",
+        MYSQL_TYPE_LONG_BLOB => "longblob",
+        MYSQL_TYPE_BLOB => "blob",
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => "varchar",
+        MYSQL_TYPE_STRING => "char",
+        MYSQL_TYPE_GEOMETRY => "geometry",
+        MYSQL_TYPE_NULL => "null",
+        other => return format!("{:?}", other).to_lowercase(),
+    }
+    .to_string()
+}
+
 fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value {
     let Some(column) = row.columns_ref().get(idx) else {
         return serde_json::Value::Null;
@@ -259,14 +299,13 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
         | ColumnType::MYSQL_TYPE_TIME
         | ColumnType::MYSQL_TYPE_TIME2
         | ColumnType::MYSQL_TYPE_NEWDATE => {
-            if let Some(v) = row_get::<NaiveDateTime, _>(row, idx) {
-                return serde_json::Value::String(v.to_string());
-            }
-            if let Some(v) = row_get::<NaiveDate, _>(row, idx) {
-                return serde_json::Value::String(v.to_string());
-            }
-            if let Some(v) = row_get::<NaiveTime, _>(row, idx) {
-                return serde_json::Value::String(v.to_string());
+            if let Some(value) = mysql_temporal_value_to_json(
+                column.column_type(),
+                row_get::<NaiveDateTime, _>(row, idx),
+                row_get::<NaiveDate, _>(row, idx),
+                row_get::<NaiveTime, _>(row, idx),
+            ) {
+                return value;
             }
         }
         _ => {}
@@ -288,6 +327,29 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
         .unwrap_or(serde_json::Value::Null)
 }
 
+fn mysql_temporal_value_to_json(
+    column_type: ColumnType,
+    datetime: Option<NaiveDateTime>,
+    date: Option<NaiveDate>,
+    time: Option<NaiveTime>,
+) -> Option<serde_json::Value> {
+    let value = match column_type {
+        ColumnType::MYSQL_TYPE_DATE | ColumnType::MYSQL_TYPE_NEWDATE => {
+            date.map(|value| value.to_string()).or_else(|| datetime.map(|value| value.date().to_string()))?
+        }
+        ColumnType::MYSQL_TYPE_TIME | ColumnType::MYSQL_TYPE_TIME2 => time.map(|value| value.to_string())?,
+        ColumnType::MYSQL_TYPE_TIMESTAMP
+        | ColumnType::MYSQL_TYPE_TIMESTAMP2
+        | ColumnType::MYSQL_TYPE_DATETIME
+        | ColumnType::MYSQL_TYPE_DATETIME2 => datetime
+            .map(|value| value.to_string())
+            .or_else(|| date.map(|value| value.to_string()))
+            .or_else(|| time.map(|value| value.to_string()))?,
+        _ => return None,
+    };
+    Some(serde_json::Value::String(value))
+}
+
 pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<MySqlPool, String> {
     connect_with_ca_cert(url, None, fallback_timeout).await
 }
@@ -297,15 +359,24 @@ pub async fn connect_with_ca_cert(
     ca_cert_path: Option<&str>,
     fallback_timeout: Duration,
 ) -> Result<MySqlPool, String> {
+    connect_with_ca_cert_and_pool_limit(url, ca_cert_path, fallback_timeout, 3).await
+}
+
+pub async fn connect_with_ca_cert_and_pool_limit(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    fallback_timeout: Duration,
+    max_connections: usize,
+) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool = create_pool(url, ca_cert_path)?;
+    let pool = create_pool(url, ca_cert_path, max_connections)?;
     let result = verify_pool_connection(&pool, timeout).await;
 
     if let Err(ref e) = result {
         if mysql_error_should_retry_without_ssl(e) {
             if let Some(fallback_url) = ssl_fallback_url(url) {
                 log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
-                let fallback_pool = create_pool(&fallback_url, None)?;
+                let fallback_pool = create_pool(&fallback_url, None, max_connections)?;
                 return match verify_pool_connection(&fallback_pool, timeout).await {
                     Ok(()) => Ok(fallback_pool),
                     Err(e) => Err(e),
@@ -323,13 +394,14 @@ struct MySqlTlsFiles {
     sslkey: Option<String>,
 }
 
-fn create_pool(url: &str, ca_cert_path: Option<&str>) -> Result<MySqlPool, String> {
+fn create_pool(url: &str, ca_cert_path: Option<&str>, max_connections: usize) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let opts =
         mysql_async::Opts::from_url(&mysql_async_url(&tls_url.url)).map_err(|e| format!("Invalid MySQL URL: {e}"))?;
     let base_ssl_opts = opts.ssl_opts().cloned();
+    let max_connections = max_connections.max(1);
     let pool_opts = mysql_async::PoolOpts::new()
-        .with_constraints(mysql_async::PoolConstraints::new(1, 3).unwrap())
+        .with_constraints(mysql_async::PoolConstraints::new(1, max_connections).unwrap())
         .with_inactive_connection_ttl(Duration::from_secs(300));
     let mut builder = mysql_async::OptsBuilder::from_opts(opts)
         .stmt_cache_size(0)
@@ -445,6 +517,9 @@ fn mysql_setup_queries(url: &str) -> Vec<String> {
     if let Some(database) = mysql_connection_database(url) {
         queries.push(format!("USE {}", quote_identifier(&database)));
     }
+    if let Some(time_zone) = mysql_connection_time_zone(url) {
+        queries.push(format!("SET time_zone = {}", quote_value(&time_zone)));
+    }
     queries.push(format!("SET NAMES {charset}"));
     queries
 }
@@ -529,6 +604,104 @@ fn is_safe_mysql_charset_name(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn mysql_connection_time_zone(url: &str) -> Option<String> {
+    let (_, query) = url.split_once('?')?;
+    let mut jdbc_time_zone: Option<String> = None;
+    let mut go_location: Option<String> = None;
+
+    for segment in query.split('&') {
+        let Some((raw_key, raw_value)) = segment.split_once('=') else {
+            continue;
+        };
+        let key = percent_decode_str(raw_key).decode_utf8_lossy();
+        let value = percent_decode_str(raw_value).decode_utf8_lossy().trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+
+        if key.eq_ignore_ascii_case("time_zone")
+            || key.eq_ignore_ascii_case("time-zone")
+            || key.eq_ignore_ascii_case("timezone")
+        {
+            if let Some(value) = normalize_mysql_time_zone_value(&value) {
+                return Some(value);
+            }
+        } else if key.eq_ignore_ascii_case("connectionTimeZone") || key.eq_ignore_ascii_case("serverTimezone") {
+            if jdbc_time_zone.is_none() {
+                jdbc_time_zone = normalize_mysql_time_zone_value(&value);
+            }
+        } else if key.eq_ignore_ascii_case("loc") && go_location.is_none() {
+            go_location = normalize_mysql_time_zone_value(&value);
+        }
+    }
+
+    jdbc_time_zone.or(go_location)
+}
+
+fn normalize_mysql_time_zone_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("local") {
+        return Some(local_mysql_time_zone_offset());
+    }
+    if value.eq_ignore_ascii_case("utc") || value.eq_ignore_ascii_case("z") {
+        return Some("+00:00".to_string());
+    }
+    if value.eq_ignore_ascii_case("system") {
+        return Some("SYSTEM".to_string());
+    }
+    if let Some(offset) = normalize_mysql_time_zone_offset(value) {
+        return Some(offset);
+    }
+    if let Some(offset_part) = value
+        .strip_prefix("GMT")
+        .or_else(|| value.strip_prefix("gmt"))
+        .or_else(|| value.strip_prefix("UTC"))
+        .or_else(|| value.strip_prefix("utc"))
+    {
+        if let Some(offset) = normalize_mysql_time_zone_offset(offset_part) {
+            return Some(offset);
+        }
+    }
+    is_safe_mysql_time_zone_name(value).then(|| value.to_string())
+}
+
+fn normalize_mysql_time_zone_offset(value: &str) -> Option<String> {
+    let value = value.trim();
+    let (sign, rest) = match value.as_bytes().first().copied()? {
+        b'+' => ('+', &value[1..]),
+        b'-' => ('-', &value[1..]),
+        _ => return None,
+    };
+    let (hours, minutes) =
+        if let Some((hours, minutes)) = rest.split_once(':') { (hours, minutes) } else { (rest, "0") };
+    if hours.is_empty() || hours.len() > 2 || minutes.is_empty() || minutes.len() > 2 {
+        return None;
+    }
+    let hours = hours.parse::<u8>().ok()?;
+    let minutes = minutes.parse::<u8>().ok()?;
+    if hours > 14 || minutes > 59 || (hours == 14 && minutes != 0) {
+        return None;
+    }
+    Some(format!("{sign}{hours:02}:{minutes:02}"))
+}
+
+fn local_mysql_time_zone_offset() -> String {
+    let seconds = chrono::Local::now().offset().local_minus_utc();
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let seconds = seconds.abs();
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    format!("{sign}{hours:02}:{minutes:02}")
+}
+
+fn is_safe_mysql_time_zone_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'+' | b':'))
+}
+
 async fn verify_pool_connection(pool: &MySqlPool, timeout: Duration) -> Result<(), String> {
     super::with_connection_timeout("MySQL", timeout, async {
         let mut conn = pool.get_conn().await.map_err(|e| format!("MySQL connection failed: {e}"))?;
@@ -549,6 +722,7 @@ fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
 fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     (lower.contains("1105") && lower.contains("hy000"))
+        || (lower.contains("1615") && lower.contains("re-prepared"))
         || lower.contains("com_stmt_prepare")
         || lower.contains("prepared statement protocol")
         || lower.contains("this command is not supported in the prepared statement protocol yet")
@@ -651,6 +825,23 @@ fn is_jdbc_param(key: &str) -> bool {
     )
 }
 
+fn is_dbx_handled_mysql_url_param(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "charset"
+            | "time_zone"
+            | "time-zone"
+            | "timezone"
+            | "connect_timeout"
+            | "connecttimeout"
+            | "parsetime"
+            | "loc"
+            | "connectiontimezone"
+            | "servertimezone"
+            | "forceconnectiontimezonetosession"
+    )
+}
+
 fn mysql_async_url(url: &str) -> Cow<'_, str> {
     let Some((base, query)) = url.split_once('?') else {
         return Cow::Borrowed(url);
@@ -661,13 +852,7 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
     let mut changed = false;
     for segment in query.split('&') {
         let segment = segment.trim();
-        if segment.is_empty()
-            || segment.starts_with("charset=")
-            || segment.starts_with("time_zone=")
-            || segment.starts_with("time-zone=")
-            || segment.to_ascii_lowercase().starts_with("connect_timeout=")
-            || segment.to_ascii_lowercase().starts_with("connecttimeout=")
-        {
+        if segment.is_empty() {
             changed = true;
             continue;
         }
@@ -676,6 +861,10 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
             filtered.push(segment.to_string());
             continue;
         };
+        if is_dbx_handled_mysql_url_param(key) {
+            changed = true;
+            continue;
+        }
         if key.eq_ignore_ascii_case("ssl-mode") || key.eq_ignore_ascii_case("sslmode") {
             changed = true;
             match value.to_ascii_lowercase().replace('-', "_").as_str() {
@@ -711,8 +900,16 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
 }
 
 pub async fn connect_bare(url: &str, fallback_timeout: Duration) -> Result<MySqlPool, String> {
+    connect_bare_with_pool_limit(url, fallback_timeout, 3).await
+}
+
+pub async fn connect_bare_with_pool_limit(
+    url: &str,
+    fallback_timeout: Duration,
+    max_connections: usize,
+) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool = create_pool(url, None)?;
+    let pool = create_pool(url, None, max_connections)?;
     verify_pool_connection(&pool, timeout).await.map(|_| pool)
 }
 
@@ -1132,7 +1329,7 @@ fn fix_potential_double_encoding(s: &str) -> String {
 
 pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let sql = columns_sql(database, table);
-    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let mut conn = get_conn_with_health_check(pool).await?;
     let result = match conn.query_iter(&sql).await {
         Ok(result) => result,
         Err(err) => {
@@ -1182,7 +1379,7 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
 
 pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let sql = show_columns_sql(database, table, true);
-    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let mut conn = get_conn_with_health_check(pool).await?;
     let rows: Vec<mysql_async::Row> = match conn.query_iter(&sql).await {
         Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
         Err(_) => {
@@ -1251,6 +1448,8 @@ async fn execute_result_set_with_text_protocol_on_conn(
 ) -> Result<QueryResult, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
+    let column_types: Vec<String> =
+        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut stream = result
@@ -1275,6 +1474,8 @@ async fn execute_result_set_with_text_protocol_on_conn(
 
     Ok(QueryResult {
         columns,
+        column_types,
+        column_sortables: vec![],
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1292,6 +1493,8 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 ) -> Result<QueryResult, String> {
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
+    let column_types: Vec<String> =
+        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut stream = result
@@ -1316,6 +1519,8 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 
     Ok(QueryResult {
         columns,
+        column_types,
+        column_sortables: vec![],
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -1378,6 +1583,8 @@ pub async fn execute_query_on_conn_with_max_rows(
 
         Ok(QueryResult {
             columns: vec![],
+            column_types: Vec::new(),
+            column_sortables: vec![],
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
@@ -1514,8 +1721,13 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
 pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let sql = format!(
         "SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, \
-         kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME \
+         kcu.REFERENCED_TABLE_SCHEMA, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME, \
+         rc.UPDATE_RULE, rc.DELETE_RULE \
          FROM information_schema.KEY_COLUMN_USAGE kcu \
+         LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
+           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA \
+          AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME \
+          AND rc.TABLE_NAME = kcu.TABLE_NAME \
          WHERE kcu.TABLE_SCHEMA = {} AND kcu.TABLE_NAME = {} \
          AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
          ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
@@ -1534,13 +1746,15 @@ pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) ->
             ref_schema: Some(get_str_by_name(row, "REFERENCED_TABLE_SCHEMA")),
             ref_table: get_str_by_name(row, "REFERENCED_TABLE_NAME"),
             ref_column: get_str_by_name(row, "REFERENCED_COLUMN_NAME"),
+            on_update: Some(get_str_by_name(row, "UPDATE_RULE")).filter(|value| !value.is_empty()),
+            on_delete: Some(get_str_by_name(row, "DELETE_RULE")).filter(|value| !value.is_empty()),
         })
         .collect())
 }
 
 pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
     let sql = format!(
-        "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING \
+        "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT \
          FROM information_schema.TRIGGERS \
          WHERE TRIGGER_SCHEMA = {} AND EVENT_OBJECT_TABLE = {} \
          ORDER BY TRIGGER_NAME",
@@ -1557,6 +1771,7 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
             name: get_str_by_name(row, "TRIGGER_NAME"),
             event: get_str_by_name(row, "EVENT_MANIPULATION"),
             timing: get_str_by_name(row, "ACTION_TIMING"),
+            statement: Some(get_str_by_name(row, "ACTION_STATEMENT")).filter(|value| !value.is_empty()),
         })
         .collect())
 }
@@ -1565,6 +1780,21 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 mod tests {
     use super::*;
     use mysql_async::consts::ColumnFlags;
+
+    #[test]
+    fn mysql_column_type_names_map_to_friendly_names() {
+        use mysql_async::consts::ColumnType::*;
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_TINY), "tinyint");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONG), "int");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONGLONG), "bigint");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_NEWDECIMAL), "decimal");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VARCHAR), "varchar");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VAR_STRING), "varchar");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_STRING), "char");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_DATETIME), "datetime");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_JSON), "json");
+        assert_eq!(mysql_column_type_name(MYSQL_TYPE_BLOB), "blob");
+    }
 
     #[test]
     fn mysql_with_queries_are_treated_as_result_sets() {
@@ -1871,6 +2101,13 @@ mod tests {
     }
 
     #[test]
+    fn mysql_reprepared_statement_error_can_retry_with_text_protocol() {
+        let error = "Server error: ERROR HY000 (1615): Prepared statement needs to be re-prepared";
+
+        assert!(mysql_error_should_retry_with_text_protocol(error));
+    }
+
+    #[test]
     fn mysql_setup_queries_select_requested_database_before_session_init() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4");
 
@@ -1899,6 +2136,27 @@ mod tests {
         );
 
         assert_eq!(mysql_datetime_to_string(value), "2026-05-12 00:00:00");
+    }
+
+    #[test]
+    fn mysql_date_values_display_without_midnight_time() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap();
+        let datetime = date.and_hms_opt(0, 0, 0).unwrap();
+
+        assert_eq!(
+            mysql_temporal_value_to_json(ColumnType::MYSQL_TYPE_DATE, Some(datetime), Some(date), None),
+            Some(serde_json::json!("2026-06-10"))
+        );
+    }
+
+    #[test]
+    fn mysql_datetime_values_keep_time_component() {
+        let datetime = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap().and_hms_opt(12, 34, 56).unwrap();
+
+        assert_eq!(
+            mysql_temporal_value_to_json(ColumnType::MYSQL_TYPE_DATETIME, Some(datetime), None, None),
+            Some(serde_json::json!("2026-06-10 12:34:56"))
+        );
     }
 
     #[tokio::test]
@@ -1984,6 +2242,13 @@ mod tests {
     }
 
     #[test]
+    fn mysql_async_url_strips_go_and_timezone_compat_params() {
+        let url = "mysql://host:3306/db?charset=utf8mb4&parseTime=True&loc=Local&connectionTimeZone=Asia%2FShanghai&forceConnectionTimeZoneToSession=true&require_ssl=true";
+
+        assert_eq!(mysql_async_url(url).as_ref(), "mysql://host:3306/db?require_ssl=true");
+    }
+
+    #[test]
     fn ssl_fallback_does_not_disable_required_tls() {
         assert_eq!(ssl_fallback_url("mysql://host:3306/db?require_ssl=true&charset=utf8mb4"), None);
         assert_eq!(ssl_fallback_url("mysql://host:3306/db?ssl-mode=verify_ca&charset=utf8mb4"), None);
@@ -2002,6 +2267,50 @@ mod tests {
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4;DROP TABLE users"),
+            vec!["USE `db`", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_apply_explicit_time_zone() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&charset=utf8mb4"),
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+        );
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?time-zone=Asia%2FShanghai"),
+            vec!["USE `db`", "SET time_zone = 'Asia/Shanghai'", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_apply_jdbc_time_zone_aliases() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?serverTimezone=GMT%2B8"),
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+        );
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=UTC"),
+            vec!["USE `db`", "SET time_zone = '+00:00'", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_apply_go_loc_when_no_explicit_time_zone_exists() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?loc=Asia%2FShanghai"),
+            vec!["USE `db`", "SET time_zone = 'Asia/Shanghai'", "SET NAMES utf8mb4"]
+        );
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&loc=UTC"),
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_ignore_unsafe_time_zone_values() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00%27%3BDROP%20TABLE%20users"),
             vec!["USE `db`", "SET NAMES utf8mb4"]
         );
     }

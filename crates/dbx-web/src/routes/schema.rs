@@ -15,6 +15,7 @@ pub struct SchemaQuery {
     pub table: Option<String>,
     pub filter: Option<String>,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
     pub object_type: Option<dbx_core::db::ObjectSourceKind>,
 }
 
@@ -48,6 +49,7 @@ pub async fn list_tables(
         schema,
         q.filter.as_deref(),
         q.limit,
+        q.offset,
     )
     .await
     .map_err(AppError)?;
@@ -155,4 +157,64 @@ pub async fn get_ddl(
         .await
         .map_err(AppError)?;
     Ok(Json(result))
+}
+
+pub async fn list_functions(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let result = dbx_core::schema::list_functions_core(&state.app, &q.connection_id, database, schema)
+        .await
+        .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+#[derive(Deserialize)]
+pub struct SequenceQuery {
+    pub connection_id: String,
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    pub with_last_values: Option<bool>,
+}
+
+pub async fn list_sequences(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SequenceQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let result = dbx_core::schema::list_sequences_core(
+        &state.app,
+        &q.connection_id,
+        database,
+        schema,
+        q.with_last_values.unwrap_or(false),
+    )
+    .await
+    .map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn list_rules(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let result =
+        dbx_core::schema::list_rules_core(&state.app, &q.connection_id, database, schema).await.map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
+}
+
+pub async fn list_owners(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let result =
+        dbx_core::schema::list_owners_core(&state.app, &q.connection_id, database, schema).await.map_err(AppError)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))
 }

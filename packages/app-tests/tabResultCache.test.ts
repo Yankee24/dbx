@@ -1,10 +1,6 @@
 import { strict as assert } from "node:assert";
-import test from "node:test";
-import {
-  buildTabResultSnapshot,
-  decodeTabResultSnapshot,
-  encodeTabResultSnapshot,
-} from "../../apps/desktop/src/lib/tabResultCache.ts";
+import { test } from "vitest";
+import { buildTabResultSnapshot, decodeTabResultSnapshot, encodeTabResultSnapshot } from "../../apps/desktop/src/lib/tabResultCache.ts";
 import type { QueryTab } from "../../apps/desktop/src/types/database.ts";
 
 function queryTab(overrides: Partial<QueryTab> = {}): QueryTab {
@@ -48,6 +44,32 @@ test("result snapshots strip live session handles and clone result rows", () => 
   assert.deepEqual(snapshot?.result?.rows, [[1]]);
   tab.result!.rows[0]![0] = 2;
   assert.deepEqual(snapshot?.result?.rows, [[1]]);
+});
+
+test("result snapshots strip session handles from result runs", () => {
+  const tab = queryTab({
+    resultRuns: [
+      {
+        id: "run-1",
+        title: "Run 1",
+        sequence: 1,
+        sql: "select 1",
+        createdAt: 1,
+        result: {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+          session_id: "live-run-session",
+        },
+      },
+    ],
+  });
+
+  const snapshot = buildTabResultSnapshot(tab);
+
+  assert.equal(snapshot?.resultRuns?.[0]?.result?.session_id, undefined);
+  assert.deepEqual(snapshot?.resultRuns?.[0]?.result?.rows, [[1]]);
 });
 
 test("result snapshots encode as binary columnar payloads and decode back to rows", () => {

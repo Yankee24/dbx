@@ -47,9 +47,11 @@ const DEFAULT_CAPABILITY: DatabaseCapability = {
 
 const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "mysql",
+  "manticoresearch",
   "postgres",
   "sqlite",
   "rqlite",
+  "turso",
   "duckdb",
   "sqlserver",
   "oracle",
@@ -71,6 +73,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "firebird",
   "exasol",
   "opengauss",
+  "questdb",
   "oceanbase-oracle",
   "gbase",
   "access",
@@ -98,6 +101,16 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       insert: false,
       updateRequiresPrimaryKey: true,
       deleteRequiresPrimaryKey: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: false,
+    },
+  },
+  manticoresearch: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
       requiresTransactionalTableForExistingRows: false,
       transaction: false,
     },
@@ -134,6 +147,18 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       deleteRequiresPrimaryKey: true,
       requiresTransactionalTableForExistingRows: false,
       transaction: false,
+    },
+  },
+  influxdb: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: true,
+      keylessRowPredicate: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: true,
+      transaction: false,
+      readonly: true,
     },
   },
 };

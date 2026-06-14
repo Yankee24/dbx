@@ -1,5 +1,5 @@
 <div align="center">
-  <p style="font-size: 18px; white-space: nowrap;"><strong>15 MB 驾驭 40+ 种数据库。桌面端 & Docker 自托管，内置 AI 助手。</strong></p>
+  <p style="font-size: 18px; white-space: nowrap;"><strong>15 MB 驾驭 50+ 种数据库。桌面端 & Docker 自托管，内置 AI 助手。</strong></p>
 
   <p>
     <img src="https://dl.dbxio.com/assets/readme-hero-20260517.png" alt="DBX 截图" width="820" />
@@ -37,13 +37,15 @@
     <img src="https://img.shields.io/badge/KingBase-003B8E?logoColor=white" />
     <img src="https://img.shields.io/badge/TDengine-2F6FFF?logoColor=white" />
     <img src="https://img.shields.io/badge/CockroachDB-6933FF?logoColor=white" />
+    <img src="https://img.shields.io/badge/InfluxDB-d30971?logo=influxdb&logoColor=white" />
     <img src="https://img.shields.io/badge/JDBC-4B5563?logoColor=white" />
     <img src="https://img.shields.io/badge/and%20more...-555555?logoColor=white" />
   </p>
   <p>
     <a href="https://hellogithub.com/repository/t8y2/dbx" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=7f74ffda697241bf996e17e1b0900a21&claim_uid=p0UjnC1TLtyvWSx" alt="Featured｜HelloGitHub" style="width: 250px; height: 54px;" width="250" height="54" /></a>
-  </p>
-  <p>
+	<a href="https://www.producthunt.com/products/dbx/launches/dbx?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-dbx" target="_blank" rel="noopener noreferrer"><img alt="DBX - Lightweight open-source database manager built with Rust | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1136811&amp;theme=light&amp;t=1780979717555"></a>
+	  </p>
+	  <p>
     <a href="README.md">English</a> | 简体中文
   </p>
 
@@ -84,9 +86,9 @@
 
 ## 功能特性
 
-### 40+ 种数据库，一个工具搞定
+### 50+ 种数据库，一个工具搞定
 
-MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo 等数据库都能直接连接。Agent/JDBC 方向的配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB 和自定义 JDBC。全部装进约 15 MB 的应用里，不内嵌 Chromium。
+MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo 等数据库都能直接连接。Agent/JDBC 方向的配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、IRIS 等。全部装进约 15 MB 的应用里，不内嵌 Chromium。
 
 ### 查询编辑器
 
@@ -158,6 +160,8 @@ DBX 也提供独立 CLI 包，适合终端、脚本和 Codex 工作流：
 
 ```bash
 npm install -g @dbx-app/cli
+# 或通过 Homebrew
+brew tap t8y2/dbx && brew install dbx-cli
 dbx connections list --json
 dbx query local "select 1" --json
 ```
@@ -238,11 +242,34 @@ pnpm install
 pnpm dev:tauri
 ```
 
+> [!TIP]
+> DuckDB 从源码编译较慢。如果不涉及 DuckDB 功能，可以跳过以加速本地构建：
+>
+> ```bash
+> # 快速检查（跳过 DuckDB）
+> cargo check --no-default-features
+> cargo test  --no-default-features
+>
+> # Tauri 开发模式跳过 DuckDB
+> pnpm tauri dev -- --no-default-features
+> ```
+>
+> `--no-default-features` 仅影响本地开发，发布构建（`pnpm tauri build`）始终包含 DuckDB。
+
 Web 版本：
 
 ```bash
 pnpm dev:web       # 前端
 pnpm dev:backend   # 后端
+```
+
+[dbx-agents](https://github.com/t8y2/dbx-agents) 是独立仓库，存放 JDBC Agent 驱动开发工程。本地开发时建议克隆到 `dbx/` 同级目录下，用 IDE 打开父文件夹即可同时开发两个项目：
+
+```bash
+mkdir dbx-workspace && cd dbx-workspace
+git clone https://github.com/t8y2/dbx.git
+git clone https://github.com/t8y2/dbx-agents.git
+# 用 IDE 打开 dbx-workspace/ 即可同时开发两个项目
 ```
 
 ### 构建
@@ -255,13 +282,13 @@ pnpm tauri build
 
 ## 技术栈
 
-| 层级 | 技术 |
-|------|------|
-| 框架 | [Tauri 2](https://tauri.app/) |
-| 前端 | [Vue 3](https://vuejs.org/) + TypeScript |
-| UI | [shadcn-vue](https://www.shadcn-vue.com/) + Tailwind CSS |
-| 编辑器 | [CodeMirror 6](https://codemirror.net/) |
-| 后端 | Rust + [sqlx](https://github.com/launchbadge/sqlx) / [tiberius](https://github.com/prisma/tiberius) / [redis-rs](https://github.com/redis-rs/redis-rs) / [mongodb](https://github.com/mongodb/mongo-rust-driver) |
+| 层级   | 技术                                                                                                                                                                                                             |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 框架   | [Tauri 2](https://tauri.app/)                                                                                                                                                                                    |
+| 前端   | [Vue 3](https://vuejs.org/) + TypeScript                                                                                                                                                                         |
+| UI     | [shadcn-vue](https://www.shadcn-vue.com/) + Tailwind CSS                                                                                                                                                         |
+| 编辑器 | [CodeMirror 6](https://codemirror.net/)                                                                                                                                                                          |
+| 后端   | Rust + [sqlx](https://github.com/launchbadge/sqlx) / [tiberius](https://github.com/prisma/tiberius) / [redis-rs](https://github.com/redis-rs/redis-rs) / [mongodb](https://github.com/mongodb/mongo-rust-driver) |
 
 ## 社区
 
@@ -274,7 +301,7 @@ pnpm tauri build
 
 <details>
 <summary><strong>DBX 是免费的吗？</strong></summary>
-是的。DBX 基于 AGPL-3.0 协议开源，所有功能均免费使用。
+是的。DBX 基于 Apache-2.0 协议开源，所有功能均免费使用。
 </details>
 
 <details>
@@ -284,17 +311,17 @@ pnpm tauri build
 
 <details>
 <summary><strong>可以离线使用吗？</strong></summary>
-可以。桌面端完全支持离线使用。AI 功能需要网络访问模型端点（或通过 Ollama 使用本地模型）。
+可以。桌面端完全支持离线使用。内网环境安装驱动时，可在有网机器打开[离线驱动下载页](https://dbxio.com/cn/drivers)下载离线驱动包，传输到内网机器后，在 DBX 的「设置 > 驱动管理」中导入。AI 功能需要网络访问模型端点（或通过 Ollama 使用本地模型）。
 </details>
 
 <details>
 <summary><strong>DBX 和 DBeaver / TablePlus / Beekeeper Studio 有什么区别？</strong></summary>
-DBX 仅 15 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 MCP 是原生内置功能，不是插件。单一代码库同时支持 40+ 数据库、桌面端、Docker 和 Web。
+DBX 仅 15 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 MCP 是原生内置功能，不是插件。单一代码库同时支持 50+ 数据库、桌面端、Docker 和 Web。
 </details>
 
 <details>
 <summary><strong>支持哪些数据库？</strong></summary>
-MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo 等。JDBC 方向配置可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB 及自定义 JDBC 连接。
+MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo 等。JDBC 方向配置可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、IRIS 及自定义 JDBC 连接。
 </details>
 
 <details>
@@ -320,4 +347,4 @@ MySQL、PostgreSQL、SQLite、Redis、MongoDB、DuckDB、ClickHouse、SQL Server
 
 ## 开源协议
 
-[AGPL-3.0](LICENSE)
+[Apache-2.0](LICENSE)

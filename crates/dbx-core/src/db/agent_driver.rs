@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,6 +23,38 @@ pub struct AgentDriverClient {
     stderr_tail: Arc<Mutex<StderrTail>>,
     handshake: Option<AgentHandshake>,
     next_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentLaunchSpec {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub working_dir: Option<PathBuf>,
+}
+
+impl AgentLaunchSpec {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self { program: program.into(), args: Vec::new(), working_dir: None }
+    }
+
+    pub fn java_jar(java_path: impl Into<PathBuf>, jar_path: impl AsRef<Path>) -> Self {
+        let jar_path = jar_path.as_ref();
+        Self {
+            program: java_path.into(),
+            args: agent_java_args(&jar_path.to_string_lossy()),
+            working_dir: jar_path.parent().map(Path::to_path_buf),
+        }
+    }
+
+    pub fn with_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn with_working_dir(mut self, working_dir: impl Into<PathBuf>) -> Self {
+        self.working_dir = Some(working_dir.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -48,10 +80,11 @@ pub enum AgentCapability {
     PagedQuery,
     Transaction,
     Ddl,
+    Kv,
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -59,6 +92,7 @@ impl AgentCapability {
         Self::PagedQuery,
         Self::Transaction,
         Self::Ddl,
+        Self::Kv,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -70,6 +104,7 @@ impl AgentCapability {
             Self::PagedQuery => "paged_query",
             Self::Transaction => "transaction",
             Self::Ddl => "ddl",
+            Self::Kv => "kv",
         }
     }
 }
@@ -93,13 +128,14 @@ pub enum AgentMethod {
     ExecuteQueryPage,
     FetchQueryPage,
     CloseQuerySession,
+    GetExplainInfo,
     ExecuteTransaction,
     Disconnect,
     Shutdown,
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Handshake,
         Self::Connect,
         Self::TestConnection,
@@ -117,6 +153,7 @@ impl AgentMethod {
         Self::ExecuteQueryPage,
         Self::FetchQueryPage,
         Self::CloseQuerySession,
+        Self::GetExplainInfo,
         Self::ExecuteTransaction,
         Self::Disconnect,
         Self::Shutdown,
@@ -141,6 +178,7 @@ impl AgentMethod {
             Self::ExecuteQueryPage => "execute_query_page",
             Self::FetchQueryPage => "fetch_query_page",
             Self::CloseQuerySession => "close_query_session",
+            Self::GetExplainInfo => "get_explain_info",
             Self::ExecuteTransaction => "execute_transaction",
             Self::Disconnect => "disconnect",
             Self::Shutdown => "shutdown",
@@ -180,6 +218,27 @@ impl MongoAgentMethod {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKvMethod {
+    ListPrefix,
+    Get,
+    Put,
+    Delete,
+}
+
+impl AgentKvMethod {
+    pub const ALL: [Self; 4] = [Self::ListPrefix, Self::Get, Self::Put, Self::Delete];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ListPrefix => "kv_list_prefix",
+            Self::Get => "kv_get",
+            Self::Put => "kv_put",
+            Self::Delete => "kv_delete",
+        }
+    }
+}
+
 struct StderrTail {
     lines: VecDeque<String>,
     capacity: usize,
@@ -212,13 +271,17 @@ impl StderrTail {
 }
 
 impl AgentDriverClient {
-    /// Spawn a Java agent process and wait for it to signal readiness.
+    /// Spawn an agent process and wait for it to signal readiness.
     ///
-    /// The agent is started via `java -jar <jar_path>` with stdin/stdout piped.
+    /// Agents can be Java JARs, native executables, or script runtimes as long as
+    /// they speak the DBX stdin/stdout JSON-RPC protocol.
     /// Blocks (async) until the agent writes `{"ready":true}` to stdout.
-    pub async fn spawn(java_path: &str, jar_path: &str) -> Result<Self, String> {
-        let mut command = Command::new(java_path);
-        command.args(agent_java_args(jar_path)).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    pub async fn spawn(launch: AgentLaunchSpec) -> Result<Self, String> {
+        let mut command = Command::new(&launch.program);
+        command.args(&launch.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(working_dir) = &launch.working_dir {
+            command.current_dir(working_dir);
+        }
         remove_agent_proxy_env(&mut command);
 
         #[cfg(windows)]
@@ -227,7 +290,8 @@ impl AgentDriverClient {
             command.creation_flags(CREATE_NO_WINDOW);
         }
 
-        let mut child = command.spawn().map_err(|e| format!("Failed to spawn agent process: {e}"))?;
+        let mut child =
+            command.spawn().map_err(|e| format!("Failed to spawn agent process {}: {e}", launch_display(&launch)))?;
 
         let child_stdin = child.stdin.take().ok_or("Failed to capture agent stdin")?;
         let child_stdout = child.stdout.take().ok_or("Failed to capture agent stdout")?;
@@ -518,6 +582,10 @@ impl AgentDriverClient {
         self.call_method_with_timeout(AgentMethod::FetchQueryPage, params, timeout_duration).await
     }
 
+    pub async fn get_explain_info<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
+        self.call_method(AgentMethod::GetExplainInfo, params).await
+    }
+
     pub async fn close_query_session<T: DeserializeOwned + Send + 'static>(
         &mut self,
         session_id: &str,
@@ -537,6 +605,14 @@ impl AgentDriverClient {
     pub async fn call_mongo_method<T: DeserializeOwned + Send + 'static>(
         &mut self,
         method: MongoAgentMethod,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call(method.as_str(), params).await
+    }
+
+    pub async fn call_kv_method<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: AgentKvMethod,
         params: Value,
     ) -> Result<T, String> {
         self.call(method.as_str(), params).await
@@ -664,6 +740,9 @@ pub fn is_unsupported_handshake_error(error: &str) -> bool {
 }
 
 pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability: AgentCapability) -> bool {
+    if capability == AgentCapability::Kv {
+        return handshake.map(|value| value.supports(capability)).unwrap_or(false);
+    }
     handshake.map(|value| value.supports(capability)).unwrap_or(true)
 }
 
@@ -735,6 +814,12 @@ fn agent_java_args(jar_path: &str) -> Vec<String> {
 
 fn agent_jar_path_matches_key(jar_path: &str, key: &str) -> bool {
     Path::new(jar_path).components().any(|component| component.as_os_str().to_string_lossy() == key)
+}
+
+fn launch_display(launch: &AgentLaunchSpec) -> String {
+    let mut parts = vec![launch.program.to_string_lossy().to_string()];
+    parts.extend(launch.args.iter().cloned());
+    parts.join(" ")
 }
 
 fn remove_agent_proxy_env(command: &mut Command) {
@@ -844,7 +929,7 @@ mod tests {
         agent_proxy_env_vars, agent_schema_params, agent_schema_table_params, agent_supports_capability,
         agent_transaction_params, format_agent_process_error, is_unsupported_handshake_error, mongo_collection_params,
         mongo_database_params, mongo_document_id_params, read_agent_line, AgentCapability, AgentDriverClient,
-        AgentHandshake, AgentMethod, MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
+        AgentHandshake, AgentKvMethod, AgentMethod, MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
     };
     use std::io::Cursor;
 
@@ -976,7 +1061,8 @@ mod tests {
         assert_eq!(AgentCapability::PagedQuery.as_str(), "paged_query");
         assert_eq!(AgentCapability::Transaction.as_str(), "transaction");
         assert_eq!(AgentCapability::Ddl.as_str(), "ddl");
-        assert_eq!(AgentCapability::ALL.len(), 7);
+        assert_eq!(AgentCapability::Kv.as_str(), "kv");
+        assert_eq!(AgentCapability::ALL.len(), 8);
     }
 
     #[test]
@@ -1014,6 +1100,15 @@ mod tests {
     }
 
     #[test]
+    fn defines_kv_agent_protocol_methods() {
+        assert_eq!(AgentKvMethod::ListPrefix.as_str(), "kv_list_prefix");
+        assert_eq!(AgentKvMethod::Get.as_str(), "kv_get");
+        assert_eq!(AgentKvMethod::Put.as_str(), "kv_put");
+        assert_eq!(AgentKvMethod::Delete.as_str(), "kv_delete");
+        assert_eq!(AgentKvMethod::ALL.len(), 4);
+    }
+
+    #[test]
     fn exposes_schema_and_query_protocol_wrappers() {
         let _list_databases = AgentDriverClient::list_databases::<serde_json::Value>;
         let _list_schemas = AgentDriverClient::list_schemas::<serde_json::Value>;
@@ -1040,6 +1135,45 @@ mod tests {
         let _mongo_insert_document = AgentDriverClient::mongo_insert_document::<serde_json::Value>;
         let _mongo_update_document = AgentDriverClient::mongo_update_document::<serde_json::Value>;
         let _mongo_delete_document = AgentDriverClient::mongo_delete_document::<serde_json::Value>;
+    }
+
+    #[test]
+    fn exposes_kv_protocol_wrapper() {
+        let _call_kv_method = AgentDriverClient::call_kv_method::<serde_json::Value>;
+    }
+
+    #[test]
+    fn agent_query_result_default_column_types_is_empty_vec() {
+        // Old agent JARs predate the column_types field. Rust tolerates the
+        // missing field via #[serde(default)] on db::QueryResult.column_types
+        // and consumers must see an empty vector rather than an error.
+        let json = serde_json::json!({
+            "columns": ["id", "name"],
+            "rows": [[1, "Ada"]],
+            "affected_rows": 0,
+            "execution_time_ms": 1
+        });
+        let result: crate::types::QueryResult = serde_json::from_value(json).expect("deserialize legacy agent result");
+        assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
+        assert!(result.column_types.is_empty(), "missing column_types must default to empty");
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn agent_query_result_passes_through_column_types_when_present() {
+        // New PostgresLike agents (HighGo / KingBase / Vastbase / openGauss /
+        // GaussDB) include column_types alongside columns so the desktop UI
+        // can detect geometry/geography columns and offer the map preview.
+        let json = serde_json::json!({
+            "columns": ["id", "geom"],
+            "column_types": ["int4", "geometry"],
+            "rows": [[1, "POINT(116.397 39.908)"]],
+            "affected_rows": 0,
+            "execution_time_ms": 5
+        });
+        let result: crate::types::QueryResult = serde_json::from_value(json).expect("deserialize agent result");
+        assert_eq!(result.column_types, vec!["int4".to_string(), "geometry".to_string()]);
+        assert_eq!(result.rows[0][1], serde_json::json!("POINT(116.397 39.908)"));
     }
 
     #[test]
@@ -1104,6 +1238,10 @@ mod tests {
             string_array(&contract["mongoLegacyMethods"]),
             MongoAgentMethod::ALL.iter().map(|method| method.as_str()).collect::<Vec<_>>()
         );
+        assert_eq!(
+            string_array(&contract["kvMethods"]),
+            AgentKvMethod::ALL.iter().map(|method| method.as_str()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1117,6 +1255,7 @@ mod tests {
         assert!(handshake.supports(AgentCapability::Connect));
         assert!(handshake.supports(AgentCapability::Metadata));
         assert!(!handshake.supports(AgentCapability::Query));
+        assert!(!handshake.supports(AgentCapability::Kv));
     }
 
     #[test]
@@ -1130,6 +1269,8 @@ mod tests {
         assert!(agent_supports_capability(None, AgentCapability::Query));
         assert!(agent_supports_capability(Some(&handshake), AgentCapability::Connect));
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::Query));
+        assert!(!agent_supports_capability(None, AgentCapability::Kv));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::Kv));
     }
 
     #[test]

@@ -491,8 +491,11 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: crate::models::connection::default_connect_timeout_secs(),
             query_timeout_secs: crate::models::connection::default_query_timeout_secs(),
+            idle_timeout_secs: crate::models::connection::default_idle_timeout_secs(),
             ssl: false,
             ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
             sysdba: false,
             oracle_connection_type: None,
             connection_string: None,
@@ -503,10 +506,14 @@ mod tests {
             redis_sentinel_password: String::new(),
             redis_sentinel_tls: false,
             redis_cluster_nodes: String::new(),
+            redis_key_separator: crate::models::connection::default_redis_key_separator(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
             external_config: None,
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            read_only: false,
         }
     }
 
@@ -523,6 +530,7 @@ mod tests {
             key_passphrase: passphrase.to_string(),
             connect_timeout_secs: 5,
             expose_lan: false,
+            use_ssh_agent: false,
         }
     }
 

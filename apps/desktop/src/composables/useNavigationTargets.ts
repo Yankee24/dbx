@@ -26,9 +26,7 @@ async function openTableTarget(target: NavigationTarget) {
   const tabTitle = target.schema ? `${target.schema}.${target.tableName}` : target.tableName;
   const tabId = (() => {
     if (settingsStore.editorSettings.reuseDataTab) {
-      const existing = queryStore.tabs.find(
-        (tab) => tab.mode === "data" && tab.connectionId === target.connectionId && tab.database === target.database,
-      );
+      const existing = queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === target.connectionId && tab.database === target.database);
       if (existing) {
         existing.title = tabTitle;
         existing.schema = target.schema;
@@ -61,6 +59,7 @@ async function openTableTarget(target: NavigationTarget) {
       queryStore.setTableMeta(tabId, {
         schema: target.schema,
         tableName: target.tableName,
+        tableType: "TABLE",
         columns,
         primaryKeys,
       });
@@ -78,6 +77,7 @@ async function openTableTarget(target: NavigationTarget) {
     queryStore.setTableMeta(tabId, {
       schema: target.schema,
       tableName: target.tableName,
+      tableType: "TABLE",
       columns: [],
       primaryKeys: [],
     });
@@ -91,6 +91,7 @@ async function openTableTarget(target: NavigationTarget) {
       queryStore.setTableMeta(tabId, {
         schema: target.schema,
         tableName: target.tableName,
+        tableType: "TABLE",
         columns,
         primaryKeys,
       });
@@ -110,17 +111,13 @@ async function openTableTarget(target: NavigationTarget) {
       }
     }
     if (dataResult.status === "rejected") throw dataResult.reason;
-    if (columnsResult.status === "rejected")
-      console.error("[DBX] ERROR fetching table metadata:", columnsResult.reason);
+    if (columnsResult.status === "rejected") console.error("[DBX] ERROR fetching table metadata:", columnsResult.reason);
   } catch (e: any) {
     queryStore.setErrorResult(tabId, e);
   }
 }
 
-export function useNavigationTargets(dialogs: {
-  showFieldLineageDialog: { value: boolean };
-  showDatabaseSearchDialog: { value: boolean };
-}) {
+export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value: boolean }; showDatabaseSearchDialog: { value: boolean } }) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
 
@@ -134,40 +131,20 @@ export function useNavigationTargets(dialogs: {
     await openTableTarget(target);
   }
 
-  async function onStructureEditorSaved(
-    reloadData: () => Promise<void>,
-    toast: (msg: string, duration?: number) => void,
-    context: { connectionId: string; database: string; schema?: string; tableName: string },
-    commentChanged?: boolean,
-  ) {
+  async function onStructureEditorSaved(reloadData: () => Promise<void>, toast: (msg: string, duration?: number) => void, context: { connectionId: string; database: string; schema?: string; tableName: string }, commentChanged?: boolean) {
     if (!context.tableName) {
       try {
-        await connectionStore.refreshObjectListTreeNode(
-          context.connectionId,
-          context.database,
-          context.schema || undefined,
-        );
+        await connectionStore.refreshObjectListTreeNode(context.connectionId, context.database, context.schema || undefined);
       } catch {}
       return;
     }
     if (commentChanged) {
       try {
-        await connectionStore.refreshObjectListTreeNode(
-          context.connectionId,
-          context.database,
-          context.schema || undefined,
-        );
+        await connectionStore.refreshObjectListTreeNode(context.connectionId, context.database, context.schema || undefined);
       } catch {}
     }
     queryStore.invalidateTableStructure(context.connectionId, context.database, context.schema, context.tableName);
-    const matchingDataTabs = queryStore.tabs.filter(
-      (tab) =>
-        tab.mode === "data" &&
-        tab.connectionId === context.connectionId &&
-        tab.database === context.database &&
-        tab.tableMeta?.tableName === context.tableName &&
-        (tab.tableMeta.schema || "") === (context.schema || ""),
-    );
+    const matchingDataTabs = queryStore.tabs.filter((tab) => tab.mode === "data" && tab.connectionId === context.connectionId && tab.database === context.database && tab.tableMeta?.tableName === context.tableName && (tab.tableMeta.schema || "") === (context.schema || ""));
     for (const tab of matchingDataTabs) {
       try {
         const connection = connectionStore.getConfig(tab.connectionId);
@@ -176,7 +153,7 @@ export function useNavigationTargets(dialogs: {
         queryStore.setTableMeta(tab.id, {
           ...tab.tableMeta!,
           columns,
-          primaryKeys: editablePrimaryKeys(effectiveDatabaseTypeForConnection(connection), columns),
+          primaryKeys: editablePrimaryKeys(effectiveDatabaseTypeForConnection(connection), columns, tab.tableMeta!.tableType),
         });
         if (tab.id === queryStore.activeTabId) await reloadData();
       } catch (e: any) {

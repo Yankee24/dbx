@@ -32,6 +32,7 @@ pub enum ObjectSourceKind {
     View,
     Procedure,
     Function,
+    Sequence,
     Package,
     PackageBody,
 }
@@ -61,6 +62,15 @@ pub struct ColumnInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub columns: Vec<String>,
+    /// Database type name for each column, parallel to `columns`. May be empty
+    /// when a driver cannot supply types (e.g. schemaless stores or fallback
+    /// query paths); consumers must tolerate a shorter/empty vector.
+    #[serde(default)]
+    pub column_types: Vec<String>,
+    /// Sortable for each column. Parallel to `columns`. Optional and may
+    /// be shorter/empty when a driver cannot supply sortable information.
+    #[serde(default)]
+    pub column_sortables: Vec<bool>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub affected_rows: u64,
     pub execution_time_ms: u128,
@@ -92,6 +102,10 @@ pub struct ForeignKeyInfo {
     pub ref_schema: Option<String>,
     pub ref_table: String,
     pub ref_column: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,4 +113,46 @@ pub struct TriggerInfo {
     pub name: String,
     pub event: String,
     pub timing: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionInfo {
+    pub name: String,
+    pub function_type: String,
+    pub data_type: String,
+    pub definition: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequenceInfo {
+    pub name: String,
+    pub data_type: String,
+    pub start_value: String,
+    pub min_value: String,
+    pub max_value: String,
+    pub increment: String,
+    pub cycle: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleInfo {
+    pub name: String,
+    pub table_name: String,
+    pub definition: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnerInfo {
+    pub object_name: String,
+    pub object_type: String,
+    pub owner: String,
 }

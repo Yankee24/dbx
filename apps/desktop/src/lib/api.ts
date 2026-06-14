@@ -1,5 +1,6 @@
 import { isTauriRuntime } from "./tauriRuntime";
 import type * as TauriModule from "./tauri";
+import { appendDebugLog } from "./debugLog";
 
 // ---------------------------------------------------------------------------
 // Lazy backend resolution (avoids top-level await)
@@ -21,8 +22,25 @@ async function getBackend(): Promise<Backend> {
 
 function forward<K extends keyof Backend>(name: K): Backend[K] {
   return (async (...args: unknown[]) => {
+    const startedAt = performance.now();
+    const operation = String(name);
+    appendDebugLog("debug", "[DBX][api:start]", operation);
     const b = await getBackend();
-    return (b[name] as (...a: unknown[]) => unknown)(...args);
+    try {
+      const result = await (b[name] as (...a: unknown[]) => unknown)(...args);
+      appendDebugLog("debug", "[DBX][api:success]", {
+        operation,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
+      return result;
+    } catch (error) {
+      appendDebugLog("error", "[DBX][api:error]", {
+        operation,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        error,
+      });
+      throw error;
+    }
   }) as unknown as Backend[K];
 }
 
@@ -39,11 +57,16 @@ export const closeDatabaseConnection = forward("closeDatabaseConnection");
 export const refreshConnections = forward("refreshConnections");
 export const saveConnections = forward("saveConnections");
 export const loadConnections = forward("loadConnections");
+export const readKeychainPassword = forward("readKeychainPassword");
+export const readKeychainPasswords = forward("readKeychainPasswords");
 export const decryptConfig = forward("decryptConfig");
 export const listPlugins = forward("listPlugins");
 export const listJdbcDrivers = forward("listJdbcDrivers");
+export const listJdbcMavenBundles = forward("listJdbcMavenBundles");
 export const importJdbcDrivers = forward("importJdbcDrivers");
+export const installJdbcDriverFromMaven = forward("installJdbcDriverFromMaven");
 export const deleteJdbcDriver = forward("deleteJdbcDriver");
+export const deleteJdbcMavenBundle = forward("deleteJdbcMavenBundle");
 export const jdbcPluginStatus = forward("jdbcPluginStatus");
 export const installJdbcPlugin = forward("installJdbcPlugin");
 export const installJdbcPluginLocal = forward("installJdbcPluginLocal");
@@ -71,6 +94,11 @@ export const saveSavedSqlFolder = forward("saveSavedSqlFolder");
 export const deleteSavedSqlFolder = forward("deleteSavedSqlFolder");
 export const saveSavedSqlFile = forward("saveSavedSqlFile");
 export const deleteSavedSqlFile = forward("deleteSavedSqlFile");
+export const savedSqlStorageDir = forward("savedSqlStorageDir");
+export const openSavedSqlStorageDir = forward("openSavedSqlStorageDir");
+export const revealPathInFileManager = forward("revealPathInFileManager");
+export const backupSqliteDatabase = forward("backupSqliteDatabase");
+export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 
 // Schema
 export const listDatabases = forward("listDatabases");
@@ -87,6 +115,10 @@ export const listIndexes = forward("listIndexes");
 export const listForeignKeys = forward("listForeignKeys");
 export const listTriggers = forward("listTriggers");
 export const getTableDdl = forward("getTableDdl");
+export const listFunctions = forward("listFunctions");
+export const listSequences = forward("listSequences");
+export const listRules = forward("listRules");
+export const listOwners = forward("listOwners");
 export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
 
@@ -104,6 +136,8 @@ export const findStatementAtCursor = forward("findStatementAtCursor");
 export const prepareQueryPaginationExecutionPlan = forward("prepareQueryPaginationExecutionPlan");
 export const buildSortedQuerySql = forward("buildSortedQuerySql");
 export const buildExplainSql = forward("buildExplainSql");
+export const getExplainInfo = forward("getExplainInfo");
+export const buildCreateUserSql = forward("buildCreateUserSql");
 export const buildDroppedFilePreviewSql = forward("buildDroppedFilePreviewSql");
 export const buildTableSelectSql = forward("buildTableSelectSql");
 export const buildDatabaseSearchSql = forward("buildDatabaseSearchSql");
@@ -146,6 +180,7 @@ export const buildDataCompareSyncPlan = forward("buildDataCompareSyncPlan");
 // AI
 export const aiComplete = forward("aiComplete");
 export const aiStream = forward("aiStream");
+export const aiAgentStream = forward("aiAgentStream");
 export const aiCancelStream = forward("aiCancelStream");
 export const aiTestConnection = forward("aiTestConnection");
 export const aiListModels = forward("aiListModels");
@@ -153,6 +188,10 @@ export const saveAiConfig = forward("saveAiConfig");
 export const loadAiConfig = forward("loadAiConfig");
 export const loadDesktopSettings = forward("loadDesktopSettings");
 export const saveDesktopSettings = forward("saveDesktopSettings");
+export const setDriverStoreDir = forward("setDriverStoreDir");
+export const setPluginStoreDir = forward("setPluginStoreDir");
+export const setAgentStoreDir = forward("setAgentStoreDir");
+export const getDriverStorePath = forward("getDriverStorePath");
 export const loadPinnedTreeNodeIds = forward("loadPinnedTreeNodeIds");
 export const savePinnedTreeNodeIds = forward("savePinnedTreeNodeIds");
 export const webdavSyncTest = forward("webdavSyncTest");
@@ -214,15 +253,25 @@ export const redisSetAdd = forward("redisSetAdd");
 export const redisSetRemove = forward("redisSetRemove");
 export const redisZadd = forward("redisZadd");
 export const redisZrem = forward("redisZrem");
+export const redisStreamAdd = forward("redisStreamAdd");
+export const redisJsonSet = forward("redisJsonSet");
+export const redisCheckJsonModule = forward("redisCheckJsonModule");
 export const redisSetTtl = forward("redisSetTtl");
 export const redisDeleteKeys = forward("redisDeleteKeys");
 export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
 export const redisLoadMore = forward("redisLoadMore");
 
+// etcd
+export const etcdListPrefix = forward("etcdListPrefix");
+export const etcdGet = forward("etcdGet");
+export const etcdPut = forward("etcdPut");
+export const etcdDelete = forward("etcdDelete");
+
 // MongoDB
 export const mongoListDatabases = forward("mongoListDatabases");
 export const mongoListCollections = forward("mongoListCollections");
+export const documentFindDocuments = forward("documentFindDocuments");
 export const mongoFindDocuments = forward("mongoFindDocuments");
 export const mongoAggregateDocuments = forward("mongoAggregateDocuments");
 export const mongoInsertDocument = forward("mongoInsertDocument");
@@ -232,14 +281,20 @@ export const mongoUpdateDocuments = forward("mongoUpdateDocuments");
 export const mongoDeleteDocument = forward("mongoDeleteDocument");
 export const mongoDeleteDocuments = forward("mongoDeleteDocuments");
 
+// Elasticsearch
+export const elasticsearchListIndices = forward("elasticsearchListIndices");
+
 // History
 export const saveHistory = forward("saveHistory");
 export const loadHistory = forward("loadHistory");
+export const loadRedisHistory = forward("loadRedisHistory");
 export const clearHistory = forward("clearHistory");
+export const clearRedisHistory = forward("clearRedisHistory");
 export const deleteHistoryEntry = forward("deleteHistoryEntry");
 
 // Updates
 export const checkMcpServerStatus = forward("checkMcpServerStatus");
+export const installMcpServer = forward("installMcpServer");
 export const checkForUpdates = forward("checkForUpdates");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
 export const getAppVersion = forward("getAppVersion");
@@ -269,6 +324,8 @@ export type {
   JavaRuntimeMode,
   JavaRuntimeConfig,
   DriverInstallProgress,
+  DriverStoreMigrationResult,
+  DriverStorePathInfo,
   WebDavConfig,
   WebDavPasswordStatus,
   WebDavSyncSummary,
@@ -281,6 +338,14 @@ export type {
   RedisScanResult,
   RedisCommandSafety,
   RedisCommandResult,
+  KvValueEncoding,
+  KvValue,
+  KvKeyMetadata,
+  KvKeySummary,
+  KvListPrefixResponse,
+  KvGetResponse,
+  KvPutResponse,
+  KvDeleteResponse,
   MongoDocumentResult,
   HistoryEntry,
   SqlFileStatus,
@@ -302,4 +367,5 @@ export type {
   TableExportProgress,
   TableExportStatus,
   TableExportRequest,
+  AgentEvent,
 } from "./tauri";

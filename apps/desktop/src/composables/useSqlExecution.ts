@@ -7,6 +7,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { classifySqlActivityKind } from "@/lib/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sqlMetadataRefresh";
+import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redisCommandSafety";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
@@ -37,7 +38,8 @@ export function useSqlExecution(deps: {
   activeConnection: ComputedRef<ConnectionConfig | undefined>;
   executableSql: ComputedRef<string>;
   resolveExecutableSql?: () => Promise<string>;
-  activeOutputView: Ref<"result" | "explain" | "chart">;
+  activeOutputView: Ref<"result" | "summary" | "explain" | "chart">;
+  blockDangerousRedisCommands?: Ref<boolean>;
 }) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
@@ -50,6 +52,7 @@ export function useSqlExecution(deps: {
   const pendingDangerSql = ref("");
   const showDangerDialog = ref(false);
   const suppressDangerConfirm = ref(false);
+  const explainMode = ref<"explain" | "autotrace">("explain");
 
   async function resolvedExecutableSql(): Promise<string> {
     return deps.resolveExecutableSql ? await deps.resolveExecutableSql() : deps.executableSql.value;
@@ -59,6 +62,20 @@ export function useSqlExecution(deps: {
     const tab = deps.activeTab.value;
     const sql = sqlOverride ?? (await resolvedExecutableSql());
     if (!tab || !sql.trim()) return;
+    // Redis: block dangerous commands when toggle is on (check each line for multi-line input)
+    if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
+      const commands = sql
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      for (const cmd of commands) {
+        const safety = classifyRedisCommandSafety(cmd);
+        if (safety === "blocked") {
+          toast(t("redis.blockedCommand", { command: firstRedisCommandToken(cmd) }), 5000);
+          return;
+        }
+      }
+    }
     if (isDangerousSql(sql) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
       dangerSql.value = sql;
       pendingDangerSql.value = sql;
@@ -76,7 +93,11 @@ export function useSqlExecution(deps: {
     deps.activeOutputView.value = "result";
     const connName = connectionStore.getConfig(tab.connectionId)?.name || "";
     const start = Date.now();
-    await queryStore.executeCurrentSql(sql);
+    const isRedis = deps.activeConnection.value?.db_type === "redis";
+    await queryStore.executeCurrentSql(sql, isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : undefined);
+    if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
+      deps.activeOutputView.value = "summary";
+    }
     const elapsed = Date.now() - start;
     const success = !tab.result?.columns.includes("Error");
     historyStore.add({
@@ -123,7 +144,7 @@ export function useSqlExecution(deps: {
     }
 
     deps.activeOutputView.value = "explain";
-    const result = await queryStore.explainTabSql(tab.id, sql, deps.activeConnection.value?.db_type);
+    const result = await queryStore.explainTabSql(tab.id, sql, deps.activeConnection.value?.db_type, explainMode.value);
     if (!result.ok) {
       toast(explainReasonMessage(result.reason), 5000);
       return;
@@ -153,5 +174,6 @@ export function useSqlExecution(deps: {
     cancelActiveExecution,
     tryExplain,
     onDangerConfirm,
+    explainMode,
   };
 }

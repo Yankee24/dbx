@@ -4,12 +4,14 @@ const SYSTEM_DATABASE_RULES: Partial<Record<DatabaseType, ReadonlySet<string>>> 
   mysql: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
   doris: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
   starrocks: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
+  manticoresearch: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
   goldendb: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
   gbase: new Set(["information_schema", "mysql", "performance_schema", "sys"]),
   postgres: new Set(["template0", "template1"]),
   gaussdb: new Set(["template0", "template1"]),
   kwdb: new Set(["template0", "template1"]),
   opengauss: new Set(["template0", "template1"]),
+  questdb: new Set(["template0", "template1"]),
   kingbase: new Set(["template0", "template1"]),
   highgo: new Set(["template0", "template1"]),
   vastbase: new Set(["template0", "template1"]),
@@ -51,21 +53,17 @@ const SYSTEM_DATABASE_RULES: Partial<Record<DatabaseType, ReadonlySet<string>>> 
   ]),
   dameng: new Set(["ctisys", "dba", "sys", "sysauditor", "sysdba", "syssso", "system"]),
   saphana: new Set(["_sys_afl", "_sys_bi", "_sys_bic", "_sys_repo", "_sys_statistics", "sys"]),
-  cassandra: new Set([
-    "system",
-    "system_auth",
-    "system_distributed",
-    "system_schema",
-    "system_traces",
-    "system_views",
-    "system_virtual_schema",
-  ]),
+  cassandra: new Set(["system", "system_auth", "system_distributed", "system_schema", "system_traces", "system_views", "system_virtual_schema"]),
   neo4j: new Set(["system"]),
   snowflake: new Set(["snowflake", "snowflake_sample_data"]),
 };
 
 export function visibleDatabaseFilterIsEnabled(visibleDatabases: string[] | undefined): boolean {
   return Array.isArray(visibleDatabases);
+}
+
+export function canSaveVisibleDatabaseSelection(selectedNames: string[]): boolean {
+  return selectedNames.length > 0;
 }
 
 export function filterVisibleDatabaseNames(databaseNames: string[], visibleDatabases: string[] | undefined): string[] {
@@ -89,10 +87,7 @@ export function isSystemDatabaseName(databaseType: DatabaseType | undefined, dat
   return SYSTEM_DATABASE_RULES[databaseType]?.has(databaseName.toLowerCase()) ?? false;
 }
 
-export function filterDatabaseNamesForConnection(
-  databaseNames: string[],
-  connection: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases"> | undefined,
-): string[] {
+export function filterDatabaseNamesForConnection(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases"> | undefined): string[] {
   const visibleDatabases = connection?.visible_databases;
   if (visibleDatabaseFilterIsEnabled(visibleDatabases)) {
     return filterVisibleDatabaseNames(databaseNames, visibleDatabases);

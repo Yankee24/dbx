@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   ConnectionConfig,
   DatabaseInfo,
   TableInfo,
@@ -9,18 +9,25 @@ import type {
   IndexInfo,
   ForeignKeyInfo,
   TriggerInfo,
+  FunctionInfo,
+  SequenceInfo,
+  RuleInfo,
+  OwnerInfo,
   QueryResult,
   SqlReferenceAnalysis,
   DatabaseType,
   InstalledPlugin,
   JdbcDriverInfo,
+  JdbcMavenBundleInfo,
   JdbcPluginStatus,
   SidebarLayout,
   SavedSqlFile,
   SavedSqlFolder,
   SavedSqlLibrary,
 } from "@/types/database";
-import type { AiConfig } from "@/stores/settingsStore";
+import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schemaDiff";
+import type { SidebarObjectKind } from "@/lib/databaseObjectCapabilities";
+import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
 import type {
   AgentDriverInfo,
   AiCompletionRequest,
@@ -32,6 +39,7 @@ import type {
   UpgradeAllAgentDriversResult,
   AgentUpdateBlocker,
   DesktopSettings,
+  SavedSqlSyncRequest,
   DriverInstallProgress,
   JavaRuntimeConfig,
   UpdateInfo,
@@ -39,6 +47,11 @@ import type {
   RedisValue,
   RedisScanResult,
   RedisCommandResult,
+  KvValue,
+  KvListPrefixResponse,
+  KvGetResponse,
+  KvPutResponse,
+  KvDeleteResponse,
   MongoDocumentResult,
   HistoryEntry,
   SqlFileRequest,
@@ -65,44 +78,17 @@ import type {
   DroppedFilePreviewSqlOptions,
 } from "./tauri";
 import type { QueryEditability } from "@/lib/sqlAnalysis";
-import type {
-  DataGridColumnValueFilterConditionOptions,
-  DataGridContextFilterConditionOptions,
-  DataGridCountSqlOptions,
-  DataGridCopyInsertStatementOptions,
-  DataGridCopyUpdateStatementOptions,
-  DataGridSaveStatementOptions,
-  HiveTablePropertiesSqlOptions,
-} from "@/lib/dataGridSql";
-import type {
-  BuildTableStructureChangeSqlOptions,
-  BuildSingleColumnAlterSqlOptions,
-  TableStructureChangeSql,
-} from "@/lib/tableStructureEditorSql";
+import type { DataGridColumnValueFilterConditionOptions, DataGridContextFilterConditionOptions, DataGridCountSqlOptions, DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridSaveStatementOptions, HiveTablePropertiesSqlOptions } from "@/lib/dataGridSql";
+import type { BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, TableStructureChangeSql } from "@/lib/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/databaseSearch";
 import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput } from "@/lib/objectSourceEditor";
 import type { BuildViewDdlInput } from "@/lib/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/createDatabaseSql";
-import type {
-  DatabaseNameSqlOptions,
-  DropTableChildObjectSqlOptions,
-  DropObjectSqlOptions,
-  DuplicateTableStructureSqlOptions,
-  SchemaNameSqlOptions,
-  TableAdminSqlOptions,
-} from "@/lib/dbAdminSql";
+import type { DatabaseNameSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/databaseExport";
-import type {
-  DataCompareFromTablesOptions,
-  DataCompareFromTablesPreparation,
-  DataCompareSyncPlan,
-  DataCompareSyncPlanOptions,
-  DataComparePreparation,
-  DataComparePreparationOptions,
-} from "@/lib/dataCompare";
-import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff } from "@/lib/schemaDiff";
+import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataCompare";
 import type { DataGridSavePreparation } from "./tauri";
 
 // ---------------------------------------------------------------------------
@@ -171,6 +157,14 @@ export async function loadConnections(): Promise<ConnectionConfig[]> {
   return get("/api/connection/list");
 }
 
+export async function readKeychainPassword(_service: string): Promise<string> {
+  return ""; // Not available in web backend
+}
+
+export async function readKeychainPasswords(services: string[]): Promise<[string, string][]> {
+  return services.map((s) => [s, ""]); // Not available in web backend
+}
+
 export async function decryptConfig(payload: unknown, passphrase: string): Promise<string> {
   return post("/api/app-settings/config/decrypt", { payload, passphrase });
 }
@@ -185,6 +179,10 @@ export async function listPlugins(): Promise<InstalledPlugin[]> {
 
 export async function listJdbcDrivers(): Promise<JdbcDriverInfo[]> {
   return get("/api/jdbc/drivers");
+}
+
+export async function listJdbcMavenBundles(): Promise<JdbcMavenBundleInfo[]> {
+  return get("/api/jdbc/drivers/maven");
 }
 
 export async function importJdbcDrivers(pathsOrFiles: (string | File)[]): Promise<JdbcDriverInfo[]> {
@@ -203,9 +201,17 @@ export async function importJdbcDrivers(pathsOrFiles: (string | File)[]): Promis
   return res.json();
 }
 
+export async function installJdbcDriverFromMaven(coordinate: string, repositories: string[] = []): Promise<JdbcDriverInfo[]> {
+  return post("/api/jdbc/drivers/maven", { coordinate, repositories });
+}
+
 export async function deleteJdbcDriver(path: string): Promise<JdbcDriverInfo[]> {
   const fileName = path.split("/").pop() || path;
   return del(`/api/jdbc/drivers/${encodeURIComponent(fileName)}`);
+}
+
+export async function deleteJdbcMavenBundle(bundleId: string): Promise<JdbcDriverInfo[]> {
+  return del(`/api/jdbc/drivers/maven/${encodeURIComponent(bundleId)}`);
 }
 
 export async function jdbcPluginStatus(): Promise<JdbcPluginStatus> {
@@ -326,9 +332,7 @@ export async function uninstallJre(jreKey: string): Promise<void> {
   await post("/api/agents/uninstall-jre", { jreKey });
 }
 
-export async function listenAgentInstallProgress(
-  handler: (progress: DriverInstallProgress) => void,
-): Promise<() => void> {
+export async function listenAgentInstallProgress(handler: (progress: DriverInstallProgress) => void): Promise<() => void> {
   const es = new EventSource("/api/agents/progress/global");
   es.onmessage = (event) => {
     try {
@@ -360,6 +364,26 @@ export async function deleteSavedSqlFile(id: string): Promise<void> {
   return del(`/api/saved-sql/${encodeURIComponent(id)}`);
 }
 
+export async function savedSqlStorageDir(): Promise<string> {
+  return "";
+}
+
+export async function openSavedSqlStorageDir(_dir?: string | null): Promise<void> {
+  throw new Error("SQL storage directory is only available in the desktop app.");
+}
+
+export async function revealPathInFileManager(_path: string): Promise<void> {
+  throw new Error("Reveal in file manager is only available in the desktop app.");
+}
+
+export async function backupSqliteDatabase(_connectionId: string, _destinationPath: string): Promise<void> {
+  throw new Error("SQLite backup is only available in the desktop app.");
+}
+
+export async function syncSavedSqlDirectory(_request: SavedSqlSyncRequest): Promise<void> {
+  throw new Error("SQL directory sync is only available in the desktop app.");
+}
+
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
@@ -384,82 +408,46 @@ export async function listSchemas(connectionId: string, database: string): Promi
   return get(`/api/schema/schemas?${qs({ connection_id: connectionId, database })}`);
 }
 
-export async function listTables(
-  connectionId: string,
-  database: string,
-  schema: string,
-  filter?: string,
-  limit?: number,
-): Promise<TableInfo[]> {
-  return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit })}`);
+export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number): Promise<TableInfo[]> {
+  return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset })}`);
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string): Promise<ObjectInfo[]> {
-  return get(`/api/schema/objects?${qs({ connection_id: connectionId, database, schema })}`);
-}
-
-export async function listCompletionObjects(
-  connectionId: string,
-  database: string,
-  schema: string,
-): Promise<ObjectInfo[]> {
-  return get(`/api/schema/completion-objects?${qs({ connection_id: connectionId, database, schema })}`);
-}
-
-export async function getObjectSource(
-  connectionId: string,
-  database: string,
-  schema: string,
-  name: string,
-  objectType: ObjectSourceKind,
-): Promise<ObjectSource> {
+export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: SidebarObjectKind[]): Promise<ObjectInfo[]> {
   return get(
-    `/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType })}`,
+    `/api/schema/objects?${qs({
+      connection_id: connectionId,
+      database,
+      schema,
+      object_types: objectTypes?.join(","),
+    })}`,
   );
 }
 
-export async function getColumns(
-  connectionId: string,
-  database: string,
-  schema: string,
-  table: string,
-): Promise<ColumnInfo[]> {
+export async function listCompletionObjects(connectionId: string, database: string, schema: string): Promise<ObjectInfo[]> {
+  return get(`/api/schema/completion-objects?${qs({ connection_id: connectionId, database, schema })}`);
+}
+
+export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind): Promise<ObjectSource> {
+  return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType })}`);
+}
+
+export async function getColumns(connectionId: string, database: string, schema: string, table: string): Promise<ColumnInfo[]> {
   return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
-export async function listIndexes(
-  connectionId: string,
-  database: string,
-  schema: string,
-  table: string,
-): Promise<IndexInfo[]> {
+export async function listIndexes(connectionId: string, database: string, schema: string, table: string): Promise<IndexInfo[]> {
   return get(`/api/schema/indexes?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
-export async function listForeignKeys(
-  connectionId: string,
-  database: string,
-  schema: string,
-  table: string,
-): Promise<ForeignKeyInfo[]> {
+export async function listForeignKeys(connectionId: string, database: string, schema: string, table: string): Promise<ForeignKeyInfo[]> {
   return get(`/api/schema/foreign-keys?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
-export async function listTriggers(
-  connectionId: string,
-  database: string,
-  schema: string,
-  table: string,
-): Promise<TriggerInfo[]> {
+export async function listTriggers(connectionId: string, database: string, schema: string, table: string): Promise<TriggerInfo[]> {
   return get(`/api/schema/triggers?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
-export async function getTableDdl(
-  connectionId: string,
-  database: string,
-  schema: string,
-  table: string,
-): Promise<string> {
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string): Promise<string> {
   return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
@@ -467,12 +455,33 @@ export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): 
   return post("/api/schema-diff/prepare", options);
 }
 
-export async function generateSchemaSyncSql(
-  diffs: TableDiff[],
-  databaseType: DatabaseType,
-  targetSchema?: string,
-): Promise<string> {
-  return post("/api/schema-diff/generate-sync-sql", { diffs, databaseType, targetSchema });
+export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean): Promise<string> {
+  return post("/api/schema-diff/generate-sync-sql", {
+    diffs,
+    databaseType,
+    targetSchema,
+    functionDiffs: functionDiffs ?? [],
+    sequenceDiffs: sequenceDiffs ?? [],
+    ruleDiffs: ruleDiffs ?? [],
+    ownerDiffs: ownerDiffs ?? [],
+    cascadeDelete: cascadeDelete ?? false,
+  });
+}
+
+export async function listFunctions(connectionId: string, database: string, schema: string): Promise<FunctionInfo[]> {
+  return get(`/api/schema/functions?${qs({ connection_id: connectionId, database, schema })}`);
+}
+
+export async function listSequences(connectionId: string, database: string, schema: string, withLastValues: boolean): Promise<SequenceInfo[]> {
+  return get(`/api/schema/sequences?${qs({ connection_id: connectionId, database, schema, with_last_values: withLastValues ? 1 : 0 })}`);
+}
+
+export async function listRules(connectionId: string, database: string, schema: string): Promise<RuleInfo[]> {
+  return get(`/api/schema/rules?${qs({ connection_id: connectionId, database, schema })}`);
+}
+
+export async function listOwners(connectionId: string, database: string, schema: string): Promise<OwnerInfo[]> {
+  return get(`/api/schema/owners?${qs({ connection_id: connectionId, database, schema })}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -515,69 +524,40 @@ export async function executeMulti(
   return post("/api/query/execute-multi", { connectionId, database, sql, schema, executionId, ...options });
 }
 
-export async function closeQuerySession(
-  connectionId: string,
-  database: string,
-  sessionId: string,
-  clientSessionId?: string,
-): Promise<boolean> {
+export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string): Promise<boolean> {
   return post("/api/query/close-session", { connectionId, database, sessionId, clientSessionId });
 }
 
-export async function closeClientConnectionSession(
-  connectionId: string,
-  database: string,
-  clientSessionId: string,
-): Promise<boolean> {
+export async function closeClientConnectionSession(connectionId: string, database: string, clientSessionId: string): Promise<boolean> {
   return post("/api/query/close-client-session", { connectionId, database, clientSessionId });
 }
 
-export async function executeBatch(
-  connectionId: string,
-  database: string,
-  statements: string[],
-  schema?: string,
-): Promise<QueryResult> {
+export async function executeBatch(connectionId: string, database: string, statements: string[], schema?: string): Promise<QueryResult> {
   return post("/api/query/execute-batch", { connectionId, database, statements, schema });
 }
 
-export async function executeScript(
-  connectionId: string,
-  database: string,
-  sql: string,
-  schema?: string,
-): Promise<QueryResult> {
+export async function executeScript(connectionId: string, database: string, sql: string, schema?: string): Promise<QueryResult> {
   return post("/api/query/execute-script", { connectionId, database, sql, schema });
 }
 
-export async function executeInTransaction(
-  connectionId: string,
-  database: string,
-  statements: string[],
-  schema?: string,
-): Promise<QueryResult> {
+export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string): Promise<QueryResult> {
   return post("/api/query/execute-in-transaction", { connectionId, database, statements, schema });
 }
 
 export async function cancelQuery(executionId: string): Promise<boolean> {
-  return post("/api/query/cancel", { executionId });
+  const result = await post<boolean | { cancelled?: boolean }>("/api/query/cancel", { executionId });
+  return typeof result === "boolean" ? result : result.cancelled === true;
 }
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {
   return post("/api/query/analyze-sql-references", { sql, dialect });
 }
 
-export async function findStatementAtCursor(
-  sql: string,
-  cursorPos: number,
-  databaseType?: DatabaseType,
-): Promise<string> {
+export async function findStatementAtCursor(sql: string, cursorPos: number, databaseType?: DatabaseType): Promise<string> {
   return post("/api/query/find-statement-at-cursor", { sql, cursorPos, databaseType });
 }
 
-export async function prepareQueryPaginationExecutionPlan(
-  options: QueryPaginationExecutionPlanOptions,
-): Promise<QueryPaginationExecutionPlan> {
+export async function prepareQueryPaginationExecutionPlan(options: QueryPaginationExecutionPlanOptions): Promise<QueryPaginationExecutionPlan> {
   return post("/api/query/prepare-pagination-plan", { options });
 }
 
@@ -587,6 +567,19 @@ export async function buildSortedQuerySql(options: SortedQuerySqlOptions): Promi
 
 export async function buildExplainSql(options: BuildExplainSqlOptions): Promise<ExplainSqlBuildResult> {
   return post("/api/query/build-explain-sql", { options });
+}
+
+export async function buildCreateUserSql(username: string, password: string, tablespace: string): Promise<string> {
+  return post("/api/query/build-create-user-sql", { username, password, tablespace });
+}
+
+export async function getExplainInfo(connectionId: string, database: string | undefined, schema: string | undefined, sql: string, mode: string): Promise<string | undefined> {
+  try {
+    const result = await post<string>("/api/query/get-explain-info", { connectionId, database, schema, sql, mode });
+    return result;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlOptions): Promise<string | undefined> {
@@ -654,9 +647,7 @@ export async function buildDuplicateTableStructureSql(options: DuplicateTableStr
   return post("/api/query/build-duplicate-table-structure-sql", { options });
 }
 
-export async function buildExecutableObjectSourceStatements(
-  input: BuildEditableObjectSourceSqlInput,
-): Promise<string[]> {
+export async function buildExecutableObjectSourceStatements(input: BuildEditableObjectSourceSqlInput): Promise<string[]> {
   return post("/api/query/build-executable-object-source-statements", { input });
 }
 
@@ -664,9 +655,7 @@ export async function buildExecutableObjectSourceSql(input: BuildEditableObjectS
   return post("/api/query/build-executable-object-source-sql", { input });
 }
 
-export async function buildRoutineRenameObjectSourceStatements(
-  input: BuildRoutineRenameObjectSourceInput,
-): Promise<string[]> {
+export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
   return post("/api/query/build-routine-rename-object-source-statements", { input });
 }
 
@@ -674,21 +663,15 @@ export async function buildViewDdlSql(input: BuildViewDdlInput): Promise<string>
   return post("/api/query/build-view-ddl-sql", { input });
 }
 
-export async function buildTableStructureChangeSql(
-  options: BuildTableStructureChangeSqlOptions,
-): Promise<TableStructureChangeSql> {
+export async function buildTableStructureChangeSql(options: BuildTableStructureChangeSqlOptions): Promise<TableStructureChangeSql> {
   return post("/api/query/build-table-structure-change-sql", { options });
 }
 
-export async function buildCreateTableSql(
-  options: BuildTableStructureChangeSqlOptions,
-): Promise<TableStructureChangeSql> {
+export async function buildCreateTableSql(options: BuildTableStructureChangeSqlOptions): Promise<TableStructureChangeSql> {
   return post("/api/query/build-create-table-sql", { options });
 }
 
-export async function buildSingleColumnAlterSql(
-  options: BuildSingleColumnAlterSqlOptions,
-): Promise<TableStructureChangeSql> {
+export async function buildSingleColumnAlterSql(options: BuildSingleColumnAlterSqlOptions): Promise<TableStructureChangeSql> {
   return post("/api/query/build-single-column-alter-sql", { options });
 }
 
@@ -700,29 +683,21 @@ export async function prepareDataGridSave(options: DataGridSaveStatementOptions)
   return post("/api/query/prepare-data-grid-save", { options });
 }
 
-export async function buildDataGridCopyUpdateStatements(
-  options: DataGridCopyUpdateStatementOptions,
-): Promise<string[]> {
+export async function buildDataGridCopyUpdateStatements(options: DataGridCopyUpdateStatementOptions): Promise<string[]> {
   return post("/api/query/build-data-grid-copy-update-statements", { options });
 }
 
-export async function buildDataGridCopyInsertStatement(
-  options: DataGridCopyInsertStatementOptions,
-): Promise<string | undefined> {
+export async function buildDataGridCopyInsertStatement(options: DataGridCopyInsertStatementOptions): Promise<string | undefined> {
   const result = await post<string | null>("/api/query/build-data-grid-copy-insert-statement", { options });
   return result ?? undefined;
 }
 
-export async function buildDataGridContextFilterCondition(
-  options: DataGridContextFilterConditionOptions,
-): Promise<string | undefined> {
+export async function buildDataGridContextFilterCondition(options: DataGridContextFilterConditionOptions): Promise<string | undefined> {
   const result = await post<string | null>("/api/query/build-data-grid-context-filter-condition", { options });
   return result ?? undefined;
 }
 
-export async function buildDataGridColumnValueFilterCondition(
-  options: DataGridColumnValueFilterConditionOptions,
-): Promise<string | undefined> {
+export async function buildDataGridColumnValueFilterCondition(options: DataGridColumnValueFilterConditionOptions): Promise<string | undefined> {
   const result = await post<string | null>("/api/query/build-data-grid-column-value-filter-condition", { options });
   return result ?? undefined;
 }
@@ -751,15 +726,11 @@ export async function prepareDataCompare(options: DataComparePreparationOptions)
   return post("/api/data-compare/prepare", options);
 }
 
-export async function prepareDataCompareFromTables(
-  options: DataCompareFromTablesOptions,
-): Promise<DataCompareFromTablesPreparation> {
+export async function prepareDataCompareFromTables(options: DataCompareFromTablesOptions): Promise<DataCompareFromTablesPreparation> {
   return post("/api/data-compare/prepare-from-tables", options);
 }
 
-export async function prepareDataCompareMissingTarget(
-  options: import("@/lib/dataCompare").DataCompareMissingTargetOptions,
-): Promise<DataCompareFromTablesPreparation> {
+export async function prepareDataCompareMissingTarget(options: import("@/lib/dataCompare").DataCompareMissingTargetOptions): Promise<DataCompareFromTablesPreparation> {
   return post("/api/data-compare/prepare-missing-target", options);
 }
 
@@ -775,11 +746,7 @@ export async function aiComplete(request: AiCompletionRequest): Promise<string> 
   return post("/api/ai/complete", { request });
 }
 
-export async function aiStream(
-  sessionId: string,
-  request: AiCompletionRequest,
-  onChunk: (chunk: AiStreamChunk) => void,
-): Promise<void> {
+export async function aiStream(sessionId: string, request: AiCompletionRequest, onChunk: (chunk: AiStreamChunk) => void): Promise<void> {
   const res = await fetch("/api/ai/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -820,12 +787,64 @@ export async function aiCancelStream(sessionId: string): Promise<boolean> {
   return post("/api/ai/cancel-stream", { sessionId });
 }
 
-export async function aiTestConnection(config: AiConfig): Promise<string> {
+export async function aiTestConnection(config: AiConfig): Promise<AiTestConnectionResult> {
   return post("/api/ai/test-connection", { config });
 }
 
 export async function aiListModels(config: AiConfig): Promise<AiModelInfo[]> {
   return post("/api/ai/models", { config });
+}
+
+export type { AgentEvent } from "./tauri";
+
+function isAgentEvent(v: unknown): v is import("./tauri").AgentEvent {
+  return typeof v === "object" && v !== null && "type" in v && typeof (v as Record<string, unknown>).type === "string";
+}
+
+export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: import("./tauri").AgentEvent) => void, mode?: string, signal?: AbortSignal): Promise<string> {
+  const res = await fetch("/api/ai/agent-stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, request, connection_id: connectionId, database, db_type: dbType, mode: mode || "ask" }),
+    signal,
+  });
+  if (!res.ok) throw new Error(await res.text());
+
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (line.startsWith("data:")) {
+        const data = line.slice(5).trim();
+        if (data && data !== "[DONE]") {
+          try {
+            const parsed = JSON.parse(data);
+            if (!isAgentEvent(parsed)) {
+              console.warn("[aiAgentStream] Skipping invalid agent event:", data);
+              continue;
+            }
+            onEvent(parsed);
+            if (parsed.type === "agent_end" || parsed.type === "error") {
+              result = data;
+            }
+          } catch {
+            // skip malformed JSON
+          }
+        }
+      }
+    }
+  }
+  return result;
 }
 
 export async function saveAiConfig(config: AiConfig): Promise<void> {
@@ -837,11 +856,43 @@ export async function loadAiConfig(): Promise<AiConfig | null> {
 }
 
 export async function loadDesktopSettings(): Promise<DesktopSettings> {
-  return { show_tray_icon: true, icon_theme: "default" };
+  return { show_tray_icon: true, icon_theme: "default", debug_logging_enabled: false, saved_sql_sync_dir: null, driver_store_dir: null, plugin_store_dir: null, agent_store_dir: null };
 }
 
 export async function saveDesktopSettings(_settings: DesktopSettings): Promise<void> {
   return;
+}
+
+export interface DriverStoreMigrationResult {
+  driver_store_dir: string | null;
+  plugin_store_dir: string | null;
+  agent_store_dir: string | null;
+  migrated_plugins: boolean;
+  migrated_agents: boolean;
+}
+
+export async function setDriverStoreDir(_newDir: string | null): Promise<DriverStoreMigrationResult> {
+  throw new Error("Not available in web mode");
+}
+
+export async function setPluginStoreDir(_newDir: string | null): Promise<DriverStoreMigrationResult> {
+  throw new Error("Not available in web mode");
+}
+
+export async function setAgentStoreDir(_newDir: string | null): Promise<DriverStoreMigrationResult> {
+  throw new Error("Not available in web mode");
+}
+
+export interface DriverStorePathInfo {
+  driver_store_dir: string | null;
+  plugin_store_dir: string | null;
+  agent_store_dir: string | null;
+  plugins_dir: string;
+  agents_dir: string;
+}
+
+export async function getDriverStorePath(): Promise<DriverStorePathInfo> {
+  throw new Error("Not available in web mode");
 }
 
 export interface WebDavConfig {
@@ -888,18 +939,11 @@ export async function forgetWebdavSavedPassword(_config: WebDavConfig): Promise<
   throw new Error("WebDAV sync is only available in the desktop app.");
 }
 
-export async function webdavSyncUpload(
-  _config: WebDavConfig,
-  _editorSettings?: unknown,
-  _secretsPassphrase?: string,
-): Promise<WebDavSyncSummary> {
+export async function webdavSyncUpload(_config: WebDavConfig, _editorSettings?: unknown, _secretsPassphrase?: string): Promise<WebDavSyncSummary> {
   throw new Error("WebDAV sync is only available in the desktop app.");
 }
 
-export async function webdavSyncDownload(
-  _config: WebDavConfig,
-  _secretsPassphrase?: string,
-): Promise<WebDavDownloadResult> {
+export async function webdavSyncDownload(_config: WebDavConfig, _secretsPassphrase?: string): Promise<WebDavDownloadResult> {
   throw new Error("WebDAV sync is only available in the desktop app.");
 }
 
@@ -977,10 +1021,7 @@ export async function readExternalSqlFile(_path: string): Promise<string> {
 // Data Transfer
 // ---------------------------------------------------------------------------
 
-export async function startTransfer(
-  request: TransferRequest,
-  onProgress: (progress: TransferProgress) => void,
-): Promise<void> {
+export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void): Promise<void> {
   // 1. POST to start the transfer
   const res = await fetch("/api/transfer/start", {
     method: "POST",
@@ -1026,10 +1067,7 @@ export async function previewTableImportFile(fileOrPath: string | File): Promise
   return res.json();
 }
 
-export async function importTableFile(
-  request: TableImportRequest,
-  onProgress: (progress: TableImportProgress) => void,
-): Promise<TableImportSummary> {
+export async function importTableFile(request: TableImportRequest, onProgress: (progress: TableImportProgress) => void): Promise<TableImportSummary> {
   // 1. POST to start the import
   const res = await fetch("/api/import/execute", {
     method: "POST",
@@ -1073,10 +1111,7 @@ export async function cancelTableImport(importId: string): Promise<boolean> {
 // Database Export
 // ---------------------------------------------------------------------------
 
-export async function exportDatabaseSql(
-  request: DatabaseExportRequest,
-  onProgress: (progress: ExportProgress) => void,
-): Promise<void> {
+export async function exportDatabaseSql(request: DatabaseExportRequest, onProgress: (progress: ExportProgress) => void): Promise<void> {
   // 1. POST to start the export
   const res = await fetch("/api/export/database", {
     method: "POST",
@@ -1109,10 +1144,7 @@ export async function cancelDatabaseExport(exportId: string): Promise<void> {
 
 // --- Table Export ---
 
-export async function startTableExport(
-  request: TableExportRequest,
-  onProgress: (progress: TableExportProgress) => void,
-): Promise<TableExportProgress> {
+export async function startTableExport(request: TableExportRequest, onProgress: (progress: TableExportProgress) => void): Promise<TableExportProgress> {
   const { exportId } = request;
 
   return new Promise((resolve, reject) => {
@@ -1169,11 +1201,7 @@ export async function cancelTableExport(exportId: string): Promise<void> {
   return post("/api/export/table/cancel", { exportId });
 }
 
-export async function exportQueryResultCsv(
-  filePath: string,
-  columns: string[],
-  rows: readonly (readonly XlsxCellValue[])[],
-): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
   const { formatCsv } = await import("./exportFormats");
   const content = formatCsv(columns, rows as (string | number | boolean | null)[][]);
   const fileName = filePath.split(/[\\/]/).pop() || "export.csv";
@@ -1201,12 +1229,7 @@ function downloadTextFile(filePath: string, fallbackFileName: string, content: s
   URL.revokeObjectURL(url);
 }
 
-export async function exportQueryResultXlsx(
-  filePath: string,
-  sheetName: string | undefined,
-  columns: string[],
-  rows: readonly (readonly XlsxCellValue[])[],
-): Promise<void> {
+export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
   const { buildXlsxWorkbook } = await import("./xlsxExport");
   const workbook = buildXlsxWorkbook({
     sheetName: sheetName || "Export",
@@ -1225,20 +1248,12 @@ export async function exportQueryResultXlsx(
   URL.revokeObjectURL(url);
 }
 
-export async function exportQueryResultJson(
-  filePath: string,
-  columns: string[],
-  rows: readonly (readonly XlsxCellValue[])[],
-): Promise<void> {
+export async function exportQueryResultJson(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
   const result = await post<{ content: string }>("/api/export/query-result-json", { columns, rows });
   downloadTextFile(filePath, "export.json", result.content, "application/json;charset=utf-8");
 }
 
-export async function exportQueryResultMarkdown(
-  filePath: string,
-  columns: string[],
-  rows: readonly (readonly XlsxCellValue[])[],
-): Promise<void> {
+export async function exportQueryResultMarkdown(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
   const result = await post<{ content: string }>("/api/export/query-result-markdown", { columns, rows });
   downloadTextFile(filePath, "export.md", result.content, "text/markdown;charset=utf-8");
 }
@@ -1251,38 +1266,19 @@ export async function redisListDatabases(connectionId: string): Promise<RedisDat
   return post("/api/redis/list-databases", { connectionId });
 }
 
-export async function redisScanKeys(
-  connectionId: string,
-  db: number,
-  cursor: number,
-  pattern: string,
-  count: number,
-): Promise<RedisScanResult> {
+export async function redisScanKeys(connectionId: string, db: number, cursor: number, pattern: string, count: number): Promise<RedisScanResult> {
   return post("/api/redis/scan-keys", { connectionId, db, cursor, pattern, count });
 }
 
-export async function redisScanValues(
-  connectionId: string,
-  db: number,
-  cursor: number,
-  pattern: string,
-  query: string,
-  count: number,
-): Promise<RedisScanResult> {
-  return post("/api/redis/scan-values", { connectionId, db, cursor, pattern, query, count });
+export async function redisScanValues(connectionId: string, db: number, cursor: number, pattern: string, query: string, count: number, includeKeyMatches = false): Promise<RedisScanResult> {
+  return post("/api/redis/scan-values", { connectionId, db, cursor, pattern, query, includeKeyMatches, count });
 }
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return post("/api/redis/get-value", { connectionId, db, keyRaw });
 }
 
-export async function redisSetString(
-  connectionId: string,
-  db: number,
-  keyRaw: string,
-  value: string,
-  ttl?: number,
-): Promise<void> {
+export async function redisSetString(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {
   return post("/api/redis/set-string", { connectionId, db, keyRaw, value, ttl });
 }
 
@@ -1290,31 +1286,19 @@ export async function redisDeleteKey(connectionId: string, db: number, keyRaw: s
   return post("/api/redis/delete-key", { connectionId, db, keyRaw });
 }
 
-export async function redisHashSet(
-  connectionId: string,
-  db: number,
-  keyRaw: string,
-  field: string,
-  value: string,
-): Promise<void> {
-  return post("/api/redis/hash-set", { connectionId, db, keyRaw, field, value });
+export async function redisHashSet(connectionId: string, db: number, keyRaw: string, field: string, value: string, ttl?: number): Promise<void> {
+  return post("/api/redis/hash-set", { connectionId, db, keyRaw, field, value, ttl });
 }
 
 export async function redisHashDel(connectionId: string, db: number, keyRaw: string, field: string): Promise<void> {
   return post("/api/redis/hash-del", { connectionId, db, keyRaw, field });
 }
 
-export async function redisListPush(connectionId: string, db: number, keyRaw: string, value: string): Promise<void> {
-  return post("/api/redis/list-push", { connectionId, db, keyRaw, value });
+export async function redisListPush(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {
+  return post("/api/redis/list-push", { connectionId, db, keyRaw, value, ttl });
 }
 
-export async function redisListSet(
-  connectionId: string,
-  db: number,
-  keyRaw: string,
-  index: number,
-  value: string,
-): Promise<void> {
+export async function redisListSet(connectionId: string, db: number, keyRaw: string, index: number, value: string): Promise<void> {
   return post("/api/redis/list-set", { connectionId, db, keyRaw, index, value });
 }
 
@@ -1322,26 +1306,32 @@ export async function redisListRemove(connectionId: string, db: number, keyRaw: 
   return post("/api/redis/list-remove", { connectionId, db, keyRaw, index });
 }
 
-export async function redisSetAdd(connectionId: string, db: number, keyRaw: string, member: string): Promise<void> {
-  return post("/api/redis/set-add", { connectionId, db, keyRaw, member });
+export async function redisSetAdd(connectionId: string, db: number, keyRaw: string, member: string, ttl?: number): Promise<void> {
+  return post("/api/redis/set-add", { connectionId, db, keyRaw, member, ttl });
 }
 
 export async function redisSetRemove(connectionId: string, db: number, keyRaw: string, member: string): Promise<void> {
   return post("/api/redis/set-remove", { connectionId, db, keyRaw, member });
 }
 
-export async function redisZadd(
-  connectionId: string,
-  db: number,
-  keyRaw: string,
-  member: string,
-  score: number,
-): Promise<void> {
-  return post("/api/redis/zadd", { connectionId, db, keyRaw, member, score });
+export async function redisZadd(connectionId: string, db: number, keyRaw: string, member: string, score: number, ttl?: number): Promise<void> {
+  return post("/api/redis/zadd", { connectionId, db, keyRaw, member, score, ttl });
 }
 
 export async function redisZrem(connectionId: string, db: number, keyRaw: string, member: string): Promise<void> {
   return post("/api/redis/zrem", { connectionId, db, keyRaw, member });
+}
+
+export async function redisStreamAdd(connectionId: string, db: number, keyRaw: string, entryId: string, fields: [string, string][], ttl?: number): Promise<void> {
+  return post("/api/redis/stream-add", { connectionId, db, keyRaw, entryId, fields, ttl });
+}
+
+export async function redisJsonSet(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {
+  return post("/api/redis/json-set", { connectionId, db, keyRaw, value, ttl });
+}
+
+export async function redisCheckJsonModule(connectionId: string, db: number): Promise<boolean> {
+  return post("/api/redis/check-json-module", { connectionId, db });
 }
 
 export async function redisSetTtl(connectionId: string, db: number, keyRaw: string, ttl: number): Promise<void> {
@@ -1356,23 +1346,32 @@ export async function redisFlushDb(connectionId: string, db: number): Promise<vo
   return post("/api/redis/flush-db", { connectionId, db });
 }
 
-export async function redisExecuteCommand(
-  connectionId: string,
-  db: number,
-  command: string,
-): Promise<RedisCommandResult> {
-  return post("/api/redis/execute-command", { connectionId, db, command });
+export async function redisExecuteCommand(connectionId: string, db: number, command: string, skipSafetyCheck?: boolean): Promise<RedisCommandResult> {
+  return post("/api/redis/execute-command", { connectionId, db, command, skipSafetyCheck: skipSafetyCheck ?? false });
 }
 
-export async function redisLoadMore(
-  connectionId: string,
-  db: number,
-  keyRaw: string,
-  keyType: string,
-  cursor: number,
-  count: number,
-): Promise<RedisValue> {
+export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number): Promise<RedisValue> {
   return post("/api/redis/load-more", { connectionId, db, keyRaw, keyType, cursor, count });
+}
+
+// ---------------------------------------------------------------------------
+// etcd
+// ---------------------------------------------------------------------------
+
+export async function etcdListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null): Promise<KvListPrefixResponse> {
+  return post("/api/etcd/list-prefix", { connectionId, prefix, limit, continuation });
+}
+
+export async function etcdGet(connectionId: string, key: string): Promise<KvGetResponse> {
+  return post("/api/etcd/get", { connectionId, key });
+}
+
+export async function etcdPut(connectionId: string, key: string, value: KvValue, lease?: number | null): Promise<KvPutResponse> {
+  return post("/api/etcd/put", { connectionId, key, value, lease });
+}
+
+export async function etcdDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {
+  return post("/api/etcd/delete", { connectionId, key });
 }
 
 // ---------------------------------------------------------------------------
@@ -1387,83 +1386,43 @@ export async function mongoListCollections(connectionId: string, database: strin
   return post("/api/mongo/list-collections", { connectionId, database });
 }
 
-export async function mongoFindDocuments(
-  connectionId: string,
-  database: string,
-  collection: string,
-  skip: number,
-  limit: number,
-  filter?: string,
-  sort?: string,
-): Promise<MongoDocumentResult> {
-  return post("/api/mongo/find-documents", { connectionId, database, collection, skip, limit, filter, sort });
+export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
+  return mongoListCollections(connectionId, "default");
 }
 
-export async function mongoAggregateDocuments(
-  connectionId: string,
-  database: string,
-  collection: string,
-  pipelineJson: string,
-  maxRows?: number,
-): Promise<MongoDocumentResult> {
-  return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows });
+export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/find-documents", { connectionId, database, collection, skip, limit, filter, sort, executionId });
 }
 
-export async function mongoInsertDocument(
-  connectionId: string,
-  database: string,
-  collection: string,
-  docJson: string,
-): Promise<string> {
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/document-store/find-documents", { connectionId, database, collection, skip, limit, filter, sort, executionId });
+}
+
+export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
+}
+
+export async function mongoInsertDocument(connectionId: string, database: string, collection: string, docJson: string): Promise<string> {
   return post("/api/mongo/insert-document", { connectionId, database, collection, docJson });
 }
 
-export async function mongoInsertDocuments(
-  connectionId: string,
-  database: string,
-  collection: string,
-  docsJson: string,
-): Promise<{ affected_rows: number }> {
+export async function mongoInsertDocuments(connectionId: string, database: string, collection: string, docsJson: string): Promise<{ affected_rows: number }> {
   return post("/api/mongo/insert-documents", { connectionId, database, collection, docsJson });
 }
 
-export async function mongoUpdateDocument(
-  connectionId: string,
-  database: string,
-  collection: string,
-  id: string,
-  docJson: string,
-): Promise<number> {
+export async function mongoUpdateDocument(connectionId: string, database: string, collection: string, id: string, docJson: string): Promise<number> {
   return post("/api/mongo/update-document", { connectionId, database, collection, id, docJson });
 }
 
-export async function mongoUpdateDocuments(
-  connectionId: string,
-  database: string,
-  collection: string,
-  filterJson: string,
-  updateJson: string,
-  many: boolean,
-): Promise<{ affected_rows: number }> {
+export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean): Promise<{ affected_rows: number }> {
   return post("/api/mongo/update-documents", { connectionId, database, collection, filterJson, updateJson, many });
 }
 
-export async function mongoDeleteDocument(
-  connectionId: string,
-  database: string,
-  collection: string,
-  id: string,
-): Promise<number> {
+export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: string): Promise<number> {
   return post("/api/mongo/delete-document", { connectionId, database, collection, id });
 }
 
-export async function mongoDeleteDocuments(
-  connectionId: string,
-  database: string,
-  collection: string,
-  filterJson: string,
-  many: boolean,
-): Promise<{ affected_rows: number }> {
+export async function mongoDeleteDocuments(connectionId: string, database: string, collection: string, filterJson: string, many: boolean): Promise<{ affected_rows: number }> {
   return post("/api/mongo/delete-documents", { connectionId, database, collection, filterJson, many });
 }
 
@@ -1475,12 +1434,21 @@ export async function saveHistory(entry: HistoryEntry): Promise<void> {
   return post("/api/history/save", { entry });
 }
 
-export async function loadHistory(limit: number, offset: number): Promise<HistoryEntry[]> {
-  return get(`/api/history?${qs({ limit, offset })}`);
+export async function loadHistory(limit: number, offset: number, activityKind?: string): Promise<HistoryEntry[]> {
+  return get(`/api/history?${qs({ limit, offset, activity_kind: activityKind })}`);
+}
+
+export async function loadRedisHistory(limit = 100, offset = 0): Promise<HistoryEntry[]> {
+  return loadHistory(limit, offset, "redis_command");
 }
 
 export async function clearHistory(): Promise<void> {
   return del("/api/history");
+}
+
+export async function clearRedisHistory(): Promise<void> {
+  const entries = await loadRedisHistory(1000, 0);
+  await Promise.all(entries.map((e) => deleteHistoryEntry(e.id)));
 }
 
 export async function deleteHistoryEntry(id: string): Promise<void> {
@@ -1510,6 +1478,10 @@ export async function checkMcpServerStatus(): Promise<import("./tauri").McpServe
   };
 }
 
+export async function installMcpServer(): Promise<string> {
+  throw new Error("MCP Server installation is only available in the desktop app.");
+}
+
 export async function getSystemProxyUrl(): Promise<string | null> {
   return null;
 }
@@ -1532,5 +1504,5 @@ export async function loadSidebarLayout(): Promise<SidebarLayout | null> {
 }
 
 export async function refreshConnections(): Promise<void> {
-  // Web mode doesn't maintain persistent connection pools — no-op
+  // Web mode doesn't maintain persistent connection pools 鈥?no-op
 }
